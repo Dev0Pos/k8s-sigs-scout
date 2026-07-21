@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="en" class="h-full">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>k8s-sigs-scout</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            k8s: '#326ce5',
+          }
+        }
+      }
+    }
+  </script>
+  <script src="https://unpkg.com/htmx.org@2.0.4"></script>
+</head>
+<body class="h-full bg-zinc-950 text-zinc-100 antialiased">
+  <div class="min-h-full">
+    <header class="border-b border-zinc-800 bg-zinc-900/80 backdrop-blur">
+      <div class="mx-auto max-w-5xl px-4 py-6">
+        <div class="flex items-baseline gap-3">
+          <h1 class="text-2xl font-semibold tracking-tight">
+            <span class="text-k8s">k8s-sigs</span>-scout
+          </h1>
+          <span class="text-sm text-zinc-500">unassigned good first issues</span>
+        </div>
+        <p class="mt-2 text-sm text-zinc-400">
+          Filters run against an in-memory cache (GitHub API refresh every 15&nbsp;min).
+          {{ if .UpdatedAt }}Last refresh: <span class="text-zinc-300">{{ .UpdatedAt }}</span>{{ end }}
+        </p>
+      </div>
+    </header>
+
+    <main class="mx-auto max-w-5xl px-4 py-8">
+      <form
+        class="flex flex-col gap-3 sm:flex-row sm:items-end"
+        hx-get="/search"
+        hx-target="#results"
+        hx-trigger="keyup changed delay:200ms from:input, change from:select"
+      >
+        <label class="flex-1">
+          <span class="mb-1.5 block text-xs font-medium uppercase tracking-wide text-zinc-500">Search</span>
+          <input
+            type="search"
+            name="q"
+            value="{{ .Query }}"
+            placeholder="Filter by title, repo, or label…"
+            autocomplete="off"
+            class="w-full rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2.5 text-sm text-zinc-100 placeholder:text-zinc-600 focus:border-k8s focus:outline-none focus:ring-1 focus:ring-k8s"
+          />
+        </label>
+        <label class="sm:w-48">
+          <span class="mb-1.5 block text-xs font-medium uppercase tracking-wide text-zinc-500">Language / tag</span>
+          <select
+            name="lang"
+            class="w-full rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2.5 text-sm text-zinc-100 focus:border-k8s focus:outline-none focus:ring-1 focus:ring-k8s"
+          >
+            <option value="">All</option>
+            <option value="go" {{ if eq .Lang "go" }}selected{{ end }}>Go</option>
+            <option value="python" {{ if eq .Lang "python" }}selected{{ end }}>Python</option>
+            <option value="javascript" {{ if eq .Lang "javascript" }}selected{{ end }}>JavaScript</option>
+            <option value="typescript" {{ if eq .Lang "typescript" }}selected{{ end }}>TypeScript</option>
+            <option value="rust" {{ if eq .Lang "rust" }}selected{{ end }}>Rust</option>
+            <option value="java" {{ if eq .Lang "java" }}selected{{ end }}>Java</option>
+            <option value="docs" {{ if eq .Lang "docs" }}selected{{ end }}>Docs</option>
+            <option value="helm" {{ if eq .Lang "helm" }}selected{{ end }}>Helm</option>
+            <option value="yaml" {{ if eq .Lang "yaml" }}selected{{ end }}>YAML</option>
+          </select>
+        </label>
+      </form>
+
+      <div id="results" class="mt-8">
+        {{ template "results.html" . }}
+      </div>
+    </main>
+  </div>
+</body>
+</html>
