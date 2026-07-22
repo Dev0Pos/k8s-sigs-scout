@@ -90,6 +90,24 @@ func TestLanguageHints(t *testing.T) {
 	}
 }
 
+func TestFilterPath(t *testing.T) {
+	tests := []struct {
+		q, lang, want string
+	}{
+		{"", "", "/"},
+		{"  ", "  ", "/"},
+		{"helm", "", "/?q=helm"},
+		{"", "go", "/?lang=go"},
+		{"helm", "go", "/?lang=go&q=helm"},
+	}
+	for _, tt := range tests {
+		got := filterPath(tt.q, tt.lang)
+		if got != tt.want {
+			t.Fatalf("filterPath(%q, %q) = %q, want %q", tt.q, tt.lang, got, tt.want)
+		}
+	}
+}
+
 func TestFilterIssues(t *testing.T) {
 	issues := []Issue{
 		{

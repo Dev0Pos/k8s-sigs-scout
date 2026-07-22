@@ -7,7 +7,9 @@ import (
 	"html/template"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -17,9 +19,11 @@ import (
 var templateFS embed.FS
 
 const (
-	githubSearchURL = "https://api.github.com/search/issues?q=org:kubernetes-sigs+is:issue+is:open+label:%22good+first+issue%22+no:assignee&per_page=100"
-	cacheInterval   = 15 * time.Minute
-	k8sBlue         = "#326ce5"
+	githubSearchQ = `org:kubernetes-sigs is:issue is:open label:"good first issue" no:assignee`
+	perPage       = 100
+	maxPages      = 10 // GitHub Search API caps around 1000 results
+	cacheInterval = 15 * time.Minute
+	k8sBlue       = "#326ce5"
 )
 
 // Issue is a trimmed view of a GitHub search result item.
@@ -71,46 +75,78 @@ func (c *Cache) Set(issues []Issue, err error) {
 }
 
 func fetchIssues() ([]Issue, error) {
-	req, err := http.NewRequest(http.MethodGet, githubSearchURL, nil)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Accept", "application/vnd.github+json")
-	req.Header.Set("User-Agent", "k8s-sigs-scout")
-
 	client := &http.Client{Timeout: 30 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
+	var all []Issue
+	seen := map[string]bool{}
 
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("GitHub API returned %s", resp.Status)
-	}
-
-	var payload githubSearchResponse
-	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
-		return nil, err
-	}
-
-	issues := make([]Issue, 0, len(payload.Items))
-	for _, item := range payload.Items {
-		repo := repoFromURL(item.RepositoryURL)
-		labels := make([]string, 0, len(item.Labels))
-		for _, l := range item.Labels {
-			labels = append(labels, l.Name)
+	for page := 1; page <= maxPages; page++ {
+		u, err := url.Parse("https://api.github.com/search/issues")
+		if err != nil {
+			return nil, err
 		}
-		issues = append(issues, Issue{
-			Title:         item.Title,
-			HTMLURL:       item.HTMLURL,
-			Comments:      item.Comments,
-			Repository:    repo,
-			Labels:        labels,
-			LanguageHints: languageHints(repo, labels),
-		})
+		q := u.Query()
+		q.Set("q", githubSearchQ)
+		q.Set("per_page", strconv.Itoa(perPage))
+		q.Set("page", strconv.Itoa(page))
+		u.RawQuery = q.Encode()
+
+		req, err := http.NewRequest(http.MethodGet, u.String(), nil)
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Accept", "application/vnd.github+json")
+		req.Header.Set("User-Agent", "k8s-sigs-scout")
+
+		resp, err := client.Do(req)
+		if err != nil {
+			return nil, err
+		}
+
+		if resp.StatusCode != http.StatusOK {
+			resp.Body.Close()
+			return nil, fmt.Errorf("GitHub API returned %s (page %d)", resp.Status, page)
+		}
+
+		var payload githubSearchResponse
+		err = json.NewDecoder(resp.Body).Decode(&payload)
+		resp.Body.Close()
+		if err != nil {
+			return nil, err
+		}
+
+		if len(payload.Items) == 0 {
+			break
+		}
+
+		for _, item := range payload.Items {
+			if seen[item.HTMLURL] {
+				continue
+			}
+			seen[item.HTMLURL] = true
+			repo := repoFromURL(item.RepositoryURL)
+			labels := make([]string, 0, len(item.Labels))
+			for _, l := range item.Labels {
+				labels = append(labels, l.Name)
+			}
+			all = append(all, Issue{
+				Title:         item.Title,
+				HTMLURL:       item.HTMLURL,
+				Comments:      item.Comments,
+				Repository:    repo,
+				Labels:        labels,
+				LanguageHints: languageHints(repo, labels),
+			})
+		}
+
+		log.Printf("fetched page %d: +%d items (cache so far %d / reported total %d)",
+			page, len(payload.Items), len(all), payload.TotalCount)
+
+		if len(payload.Items) < perPage || len(all) >= payload.TotalCount {
+			break
+		}
 	}
-	return issues, nil
+
+	return all, nil
 }
 
 func repoFromURL(repositoryURL string) string {
@@ -232,6 +268,23 @@ func filterIssues(issues []Issue, q, lang string) []Issue {
 	return out
 }
 
+// filterPath builds a shareable deep-link path like /?q=helm&lang=go
+func filterPath(q, lang string) string {
+	q = strings.TrimSpace(q)
+	lang = strings.TrimSpace(lang)
+	if q == "" && lang == "" {
+		return "/"
+	}
+	v := url.Values{}
+	if q != "" {
+		v.Set("q", q)
+	}
+	if lang != "" {
+		v.Set("lang", lang)
+	}
+	return "/?" + v.Encode()
+}
+
 type pageData struct {
 	Issues    []Issue
 	Query     string
@@ -241,6 +294,26 @@ type pageData struct {
 	Total     int
 	Error     string
 	K8sBlue   string
+}
+
+func buildPageData(cache *Cache, q, lang string) pageData {
+	issues, updatedAt, err := cache.Get()
+	filtered := filterIssues(issues, q, lang)
+	data := pageData{
+		Issues:  filtered,
+		Query:   q,
+		Lang:    lang,
+		Count:   len(filtered),
+		Total:   len(issues),
+		K8sBlue: k8sBlue,
+	}
+	if !updatedAt.IsZero() {
+		data.UpdatedAt = updatedAt.Format(time.RFC822)
+	}
+	if err != nil && len(issues) == 0 {
+		data.Error = err.Error()
+	}
+	return data
 }
 
 func main() {
@@ -259,56 +332,36 @@ func main() {
 
 	mux := http.NewServeMux()
 
+	render := func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query().Get("q")
+		lang := r.URL.Query().Get("lang")
+		data := buildPageData(cache, q, lang)
+
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		// HTMX partial swap: return only the results list.
+		if r.Header.Get("HX-Request") == "true" {
+			if err := tmpl.ExecuteTemplate(w, "results.html", data); err != nil {
+				log.Printf("template error: %v", err)
+				http.Error(w, "template error", http.StatusInternalServerError)
+			}
+			return
+		}
+		if err := tmpl.ExecuteTemplate(w, "index.html", data); err != nil {
+			log.Printf("template error: %v", err)
+			http.Error(w, "template error", http.StatusInternalServerError)
+		}
+	}
+
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/" {
 			http.NotFound(w, r)
 			return
 		}
-		issues, updatedAt, err := cache.Get()
-		data := pageData{
-			Issues:  issues,
-			Count:   len(issues),
-			Total:   len(issues),
-			K8sBlue: k8sBlue,
-		}
-		if !updatedAt.IsZero() {
-			data.UpdatedAt = updatedAt.Format(time.RFC822)
-		}
-		if err != nil && len(issues) == 0 {
-			data.Error = err.Error()
-		}
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		if err := tmpl.ExecuteTemplate(w, "index.html", data); err != nil {
-			log.Printf("template error: %v", err)
-			http.Error(w, "template error", http.StatusInternalServerError)
-		}
+		render(w, r)
 	})
 
-	mux.HandleFunc("/search", func(w http.ResponseWriter, r *http.Request) {
-		q := r.URL.Query().Get("q")
-		lang := r.URL.Query().Get("lang")
-		issues, updatedAt, err := cache.Get()
-		filtered := filterIssues(issues, q, lang)
-		data := pageData{
-			Issues:  filtered,
-			Query:   q,
-			Lang:    lang,
-			Count:   len(filtered),
-			Total:   len(issues),
-			K8sBlue: k8sBlue,
-		}
-		if !updatedAt.IsZero() {
-			data.UpdatedAt = updatedAt.Format(time.RFC822)
-		}
-		if err != nil && len(issues) == 0 {
-			data.Error = err.Error()
-		}
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		if err := tmpl.ExecuteTemplate(w, "results.html", data); err != nil {
-			log.Printf("template error: %v", err)
-			http.Error(w, "template error", http.StatusInternalServerError)
-		}
-	})
+	// Kept for compatibility with older bookmarks / hx-get="/search".
+	mux.HandleFunc("/search", render)
 
 	addr := ":" + port
 	log.Printf("k8s-sigs-scout listening on http://localhost%s", addr)

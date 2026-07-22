@@ -45,7 +45,7 @@ docker run --rm -p 3000:3000 -e PORT=3000 k8s-scout
 
 ## How it works
 
-1. On startup a background goroutine fetches open, unassigned `good first issue` items from the GitHub Search API (anonymous, no PAT).
-2. Results are stored in an in-memory cache and refreshed every **15 minutes** (`time.Ticker`), so browser traffic never hits GitHub directly and stays within the 60 req/h anonymous limit.
-3. `/` renders the dark UI (Go `html/template` + Tailwind CDN + HTMX).
-4. Typing in search or changing the language/tag filter fires `hx-get="/search"` with a 200 ms debounce; the server filters the RAM cache and swaps `#results` without a full page reload.
+1. On startup a background goroutine fetches open, unassigned `good first issue` items from the GitHub Search API (anonymous, no PAT), **paginating** through result pages into the in-memory cache.
+2. The cache refreshes every **15 minutes** (`time.Ticker`), so browser traffic never hits GitHub directly and stays within the 60 req/h anonymous limit.
+3. `/` renders the dark UI (Go `html/template` + Tailwind CDN + HTMX). Query params `q` and `lang` are **deep links** — e.g. `/?q=helm&lang=go` opens a filtered view; HTMX updates the URL as you type (`hx-push-url`).
+4. Filtering always runs against the RAM cache and swaps `#results` without a full page reload.
