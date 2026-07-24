@@ -1,6 +1,7 @@
 version: "2"
 
 linters:
+  default: none
   enable:
     - errcheck
     - govet
@@ -9,12 +10,11 @@ linters:
     - unused
     - misspell
     - revive
-
-linters-settings:
-  revive:
-    rules:
-      - name: exported
-        disabled: true
+  settings:
+    revive:
+      rules:
+        - name: exported
+          disabled: true
 
 run:
   timeout: 3m
