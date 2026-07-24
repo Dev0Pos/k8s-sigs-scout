@@ -14,14 +14,18 @@ jobs:
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
-          # No third-party deps / no go.sum — skip module cache lookup.
           cache: false
 
       - name: Test
         run: go test ./...
 
       - name: Build
-        run: CGO_ENABLED=0 go build -o /tmp/k8s-scout .
+        run: CGO_ENABLED=0 go build -o /tmp/k8s-scout ./cmd/k8s-scout
+
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v8
+        with:
+          version: v2.1
 
   docker:
     runs-on: ubuntu-latest

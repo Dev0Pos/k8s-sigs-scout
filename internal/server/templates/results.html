@@ -1,17 +1,24 @@
 {{ define "results.html" }}
-<div class="mb-4 flex items-center justify-between text-sm text-zinc-500">
+<div class="mb-4 flex flex-wrap items-center justify-between gap-2 text-sm text-zinc-500">
   <span>
-    Showing <span class="text-zinc-300">{{ .Count }}</span>
-    {{ if ne .Count .Total }}of {{ .Total }}{{ end }}
-    issue{{ if ne .Count 1 }}s{{ end }}
+    {{ if eq .Matched 0 }}
+      Showing <span class="text-zinc-300">0</span> issues
+    {{ else }}
+      Showing <span class="text-zinc-300">{{ .From }}–{{ .To }}</span>
+      of <span class="text-zinc-300">{{ .Matched }}</span>
+      {{ if ne .Matched .Total }}(filtered from {{ .Total }}){{ end }}
+    {{ end }}
   </span>
+  {{ if gt .Pages 1 }}
+  <span class="text-zinc-600">Page {{ .Page }} / {{ .Pages }}</span>
+  {{ end }}
 </div>
 
 {{ if .Error }}
 <div class="rounded-lg border border-red-900/60 bg-red-950/40 px-4 py-3 text-sm text-red-300">
   Failed to load issues: {{ .Error }}
 </div>
-{{ else if eq .Count 0 }}
+{{ else if eq .Matched 0 }}
 <div class="rounded-lg border border-zinc-800 bg-zinc-900/50 px-4 py-10 text-center text-sm text-zinc-500">
   No matching issues.
 </div>
@@ -59,5 +66,35 @@
   </li>
   {{ end }}
 </ul>
+
+{{ if gt .Pages 1 }}
+<nav class="mt-6 flex items-center justify-between gap-3" aria-label="Pagination">
+  {{ if .HasPrev }}
+  <a
+    href="{{ .PrevURL }}"
+    hx-get="{{ .PrevURL }}"
+    hx-target="#results"
+    hx-push-url="true"
+    class="rounded-lg border border-zinc-700 px-3 py-1.5 text-sm text-zinc-300 hover:border-k8s hover:text-k8s"
+  >← Previous</a>
+  {{ else }}
+  <span class="rounded-lg border border-zinc-800 px-3 py-1.5 text-sm text-zinc-700">← Previous</span>
+  {{ end }}
+
+  <span class="text-xs text-zinc-600">{{ .Page }} / {{ .Pages }}</span>
+
+  {{ if .HasNext }}
+  <a
+    href="{{ .NextURL }}"
+    hx-get="{{ .NextURL }}"
+    hx-target="#results"
+    hx-push-url="true"
+    class="rounded-lg border border-zinc-700 px-3 py-1.5 text-sm text-zinc-300 hover:border-k8s hover:text-k8s"
+  >Next →</a>
+  {{ else }}
+  <span class="rounded-lg border border-zinc-800 px-3 py-1.5 text-sm text-zinc-700">Next →</span>
+  {{ end }}
+</nav>
+{{ end }}
 {{ end }}
 {{ end }}
