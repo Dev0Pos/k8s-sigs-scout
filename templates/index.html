@@ -37,13 +37,13 @@
 
     <main class="mx-auto w-full max-w-5xl flex-1 px-4 py-8">
       <form
-        class="flex flex-col gap-3 sm:flex-row sm:items-end"
+        class="flex flex-col gap-3 lg:flex-row lg:flex-wrap lg:items-end"
         hx-get="/"
         hx-target="#results"
         hx-push-url="true"
         hx-trigger="keyup changed delay:200ms from:input, change from:select"
       >
-        <label class="flex-1">
+        <label class="min-w-0 flex-1 basis-full sm:basis-64">
           <span class="mb-1.5 block text-xs font-medium uppercase tracking-wide text-zinc-500">Search</span>
           <input
             type="search"
@@ -54,7 +54,7 @@
             class="w-full rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2.5 text-sm text-zinc-100 placeholder:text-zinc-600 focus:border-k8s focus:outline-none focus:ring-1 focus:ring-k8s"
           />
         </label>
-        <label class="sm:w-48">
+        <label class="sm:w-44">
           <span class="mb-1.5 block text-xs font-medium uppercase tracking-wide text-zinc-500">Language / tag</span>
           <select
             name="lang"
@@ -70,6 +70,30 @@
             <option value="docs" {{ if eq .Lang "docs" }}selected{{ end }}>Docs</option>
             <option value="helm" {{ if eq .Lang "helm" }}selected{{ end }}>Helm</option>
             <option value="yaml" {{ if eq .Lang "yaml" }}selected{{ end }}>YAML</option>
+          </select>
+        </label>
+        <label class="min-w-0 flex-1 sm:min-w-[14rem]">
+          <span class="mb-1.5 block text-xs font-medium uppercase tracking-wide text-zinc-500">Repository</span>
+          <select
+            name="repo"
+            class="w-full rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2.5 font-mono text-sm text-zinc-100 focus:border-k8s focus:outline-none focus:ring-1 focus:ring-k8s"
+          >
+            <option value="">All repos</option>
+            {{ range .Repos }}
+            <option value="{{ . }}" {{ if eq $.Repo . }}selected{{ end }}>{{ . }}</option>
+            {{ end }}
+          </select>
+        </label>
+        <label class="sm:w-40">
+          <span class="mb-1.5 block text-xs font-medium uppercase tracking-wide text-zinc-500">Sort</span>
+          <select
+            name="sort"
+            class="w-full rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2.5 text-sm text-zinc-100 focus:border-k8s focus:outline-none focus:ring-1 focus:ring-k8s"
+          >
+            <option value="newest" {{ if eq .Sort "newest" }}selected{{ end }}>Newest</option>
+            <option value="comments" {{ if eq .Sort "comments" }}selected{{ end }}>Most comments</option>
+            <option value="repo" {{ if eq .Sort "repo" }}selected{{ end }}>Repository</option>
+            <option value="title" {{ if eq .Sort "title" }}selected{{ end }}>Title</option>
           </select>
         </label>
       </form>

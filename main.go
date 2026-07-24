@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -24,6 +25,7 @@ const (
 	maxPages      = 10 // GitHub Search API caps around 1000 results
 	cacheInterval = 15 * time.Minute
 	k8sBlue       = "#326ce5"
+	defaultSort   = "newest"
 )
 
 // Issue is a trimmed view of a GitHub search result item.
@@ -34,14 +36,16 @@ type Issue struct {
 	Repository    string // e.g. kubernetes-sigs/kind
 	Labels        []string
 	LanguageHints []string // derived from repo name / labels for filtering
+	CreatedAt     time.Time
 }
 
 type githubSearchResponse struct {
 	TotalCount int `json:"total_count"`
 	Items      []struct {
-		Title     string `json:"title"`
-		HTMLURL   string `json:"html_url"`
-		Comments  int    `json:"comments"`
+		Title     string    `json:"title"`
+		HTMLURL   string    `json:"html_url"`
+		Comments  int       `json:"comments"`
+		CreatedAt time.Time `json:"created_at"`
 		Labels    []struct {
 			Name string `json:"name"`
 		} `json:"labels"`
@@ -53,7 +57,8 @@ type Cache struct {
 	mu        sync.RWMutex
 	issues    []Issue
 	updatedAt time.Time
-	err       error
+	err       error  // set when cache is empty after a failed refresh
+	lastErr   string // last refresh failure message (kept even if stale data remains)
 }
 
 func (c *Cache) Get() ([]Issue, time.Time, error) {
@@ -70,8 +75,47 @@ func (c *Cache) Set(issues []Issue, err error) {
 	if err == nil {
 		c.issues = issues
 		c.updatedAt = time.Now().UTC()
+		c.err = nil
+		c.lastErr = ""
+		return
 	}
-	c.err = err
+	c.lastErr = err.Error()
+	if len(c.issues) == 0 {
+		c.err = err
+	}
+}
+
+type healthResponse struct {
+	Status     string `json:"status"`
+	Issues     int    `json:"issues"`
+	UpdatedAt  string `json:"updated_at,omitempty"`
+	AgeSeconds int64  `json:"age_seconds,omitempty"`
+	Error      string `json:"error,omitempty"`
+}
+
+func (c *Cache) Health() healthResponse {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	h := healthResponse{Issues: len(c.issues)}
+	if !c.updatedAt.IsZero() {
+		h.UpdatedAt = c.updatedAt.Format(time.RFC3339)
+		h.AgeSeconds = int64(time.Since(c.updatedAt).Seconds())
+	}
+	if c.lastErr != "" {
+		h.Error = c.lastErr
+	}
+	switch {
+	case len(c.issues) == 0 && c.err != nil:
+		h.Status = "error"
+	case c.lastErr != "" && len(c.issues) > 0:
+		h.Status = "degraded"
+	case len(c.issues) == 0:
+		h.Status = "starting"
+	default:
+		h.Status = "ok"
+	}
+	return h
 }
 
 func fetchIssues() ([]Issue, error) {
@@ -88,6 +132,8 @@ func fetchIssues() ([]Issue, error) {
 		q.Set("q", githubSearchQ)
 		q.Set("per_page", strconv.Itoa(perPage))
 		q.Set("page", strconv.Itoa(page))
+		q.Set("sort", "created")
+		q.Set("order", "desc")
 		u.RawQuery = q.Encode()
 
 		req, err := http.NewRequest(http.MethodGet, u.String(), nil)
@@ -135,6 +181,7 @@ func fetchIssues() ([]Issue, error) {
 				Repository:    repo,
 				Labels:        labels,
 				LanguageHints: languageHints(repo, labels),
+				CreatedAt:     item.CreatedAt,
 			})
 		}
 
@@ -150,7 +197,6 @@ func fetchIssues() ([]Issue, error) {
 }
 
 func repoFromURL(repositoryURL string) string {
-	// https://api.github.com/repos/kubernetes-sigs/kind -> kubernetes-sigs/kind
 	const prefix = "https://api.github.com/repos/"
 	if strings.HasPrefix(repositoryURL, prefix) {
 		return strings.TrimPrefix(repositoryURL, prefix)
@@ -173,7 +219,6 @@ func languageHints(repo string, labels []string) []string {
 			seen[k] = true
 		}
 	}
-	// Normalize golang -> go for filtering UX
 	normalized := make([]string, 0, len(hints))
 	seenNorm := map[string]bool{}
 	for _, h := range hints {
@@ -208,20 +253,14 @@ func startCacheRefresher(cache *Cache) {
 		issues, err := fetchIssues()
 		if err != nil {
 			log.Printf("cache refresh failed: %v", err)
-			// Keep previous successful data; only set error if we have nothing yet.
-			cache.mu.RLock()
-			empty := len(cache.issues) == 0
-			cache.mu.RUnlock()
-			if empty {
-				cache.Set(nil, err)
-			}
+			cache.Set(nil, err)
 			return
 		}
 		cache.Set(issues, nil)
 		log.Printf("cache refreshed: %d issues", len(issues))
 	}
 
-	refresh() // initial fetch at startup
+	refresh()
 	go func() {
 		ticker := time.NewTicker(cacheInterval)
 		defer ticker.Stop()
@@ -231,16 +270,36 @@ func startCacheRefresher(cache *Cache) {
 	}()
 }
 
-func filterIssues(issues []Issue, q, lang string) []Issue {
+func uniqueRepos(issues []Issue) []string {
+	seen := map[string]bool{}
+	var repos []string
+	for _, issue := range issues {
+		if issue.Repository == "" || seen[issue.Repository] {
+			continue
+		}
+		seen[issue.Repository] = true
+		repos = append(repos, issue.Repository)
+	}
+	sort.Strings(repos)
+	return repos
+}
+
+func filterIssues(issues []Issue, q, lang, repo string) []Issue {
 	q = strings.TrimSpace(strings.ToLower(q))
 	lang = strings.TrimSpace(strings.ToLower(lang))
+	repo = strings.TrimSpace(repo)
 
-	if q == "" && lang == "" {
-		return issues
+	if q == "" && lang == "" && repo == "" {
+		out := make([]Issue, len(issues))
+		copy(out, issues)
+		return out
 	}
 
 	out := make([]Issue, 0, len(issues))
 	for _, issue := range issues {
+		if repo != "" && issue.Repository != repo {
+			continue
+		}
 		if lang != "" {
 			matchLang := false
 			for _, h := range issue.LanguageHints {
@@ -250,7 +309,6 @@ func filterIssues(issues []Issue, q, lang string) []Issue {
 				}
 			}
 			if !matchLang {
-				// also match raw labels / repo
 				blob := strings.ToLower(issue.Repository + " " + strings.Join(issue.Labels, " "))
 				if !strings.Contains(blob, lang) {
 					continue
@@ -268,13 +326,47 @@ func filterIssues(issues []Issue, q, lang string) []Issue {
 	return out
 }
 
-// filterPath builds a shareable deep-link path like /?q=helm&lang=go
-func filterPath(q, lang string) string {
+func normalizeSort(s string) string {
+	switch strings.TrimSpace(strings.ToLower(s)) {
+	case "comments", "repo", "title", "newest":
+		return strings.TrimSpace(strings.ToLower(s))
+	default:
+		return defaultSort
+	}
+}
+
+func sortIssues(issues []Issue, mode string) {
+	mode = normalizeSort(mode)
+	sort.SliceStable(issues, func(i, j int) bool {
+		a, b := issues[i], issues[j]
+		switch mode {
+		case "comments":
+			if a.Comments != b.Comments {
+				return a.Comments > b.Comments
+			}
+		case "repo":
+			if a.Repository != b.Repository {
+				return a.Repository < b.Repository
+			}
+		case "title":
+			if !strings.EqualFold(a.Title, b.Title) {
+				return strings.ToLower(a.Title) < strings.ToLower(b.Title)
+			}
+		default: // newest
+			if !a.CreatedAt.Equal(b.CreatedAt) {
+				return a.CreatedAt.After(b.CreatedAt)
+			}
+		}
+		return a.HTMLURL < b.HTMLURL
+	})
+}
+
+// filterPath builds a shareable deep-link path like /?q=helm&lang=go&repo=...&sort=comments
+func filterPath(q, lang, repo, sortMode string) string {
 	q = strings.TrimSpace(q)
 	lang = strings.TrimSpace(lang)
-	if q == "" && lang == "" {
-		return "/"
-	}
+	repo = strings.TrimSpace(repo)
+	sortMode = normalizeSort(sortMode)
 	v := url.Values{}
 	if q != "" {
 		v.Set("q", q)
@@ -282,13 +374,25 @@ func filterPath(q, lang string) string {
 	if lang != "" {
 		v.Set("lang", lang)
 	}
+	if repo != "" {
+		v.Set("repo", repo)
+	}
+	if sortMode != defaultSort {
+		v.Set("sort", sortMode)
+	}
+	if len(v) == 0 {
+		return "/"
+	}
 	return "/?" + v.Encode()
 }
 
 type pageData struct {
 	Issues    []Issue
+	Repos     []string
 	Query     string
 	Lang      string
+	Repo      string
+	Sort      string
 	UpdatedAt string
 	Count     int
 	Total     int
@@ -296,13 +400,18 @@ type pageData struct {
 	K8sBlue   string
 }
 
-func buildPageData(cache *Cache, q, lang string) pageData {
+func buildPageData(cache *Cache, q, lang, repo, sortMode string) pageData {
 	issues, updatedAt, err := cache.Get()
-	filtered := filterIssues(issues, q, lang)
+	sortMode = normalizeSort(sortMode)
+	filtered := filterIssues(issues, q, lang, repo)
+	sortIssues(filtered, sortMode)
 	data := pageData{
 		Issues:  filtered,
+		Repos:   uniqueRepos(issues),
 		Query:   q,
 		Lang:    lang,
+		Repo:    repo,
+		Sort:    sortMode,
 		Count:   len(filtered),
 		Total:   len(issues),
 		K8sBlue: k8sBlue,
@@ -332,13 +441,25 @@ func main() {
 
 	mux := http.NewServeMux()
 
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+		h := cache.Health()
+		w.Header().Set("Content-Type", "application/json")
+		status := http.StatusOK
+		if h.Status == "error" {
+			status = http.StatusServiceUnavailable
+		}
+		w.WriteHeader(status)
+		_ = json.NewEncoder(w).Encode(h)
+	})
+
 	render := func(w http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query().Get("q")
 		lang := r.URL.Query().Get("lang")
-		data := buildPageData(cache, q, lang)
+		repo := r.URL.Query().Get("repo")
+		sortMode := r.URL.Query().Get("sort")
+		data := buildPageData(cache, q, lang, repo, sortMode)
 
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		// HTMX partial swap: return only the results list.
 		if r.Header.Get("HX-Request") == "true" {
 			if err := tmpl.ExecuteTemplate(w, "results.html", data); err != nil {
 				log.Printf("template error: %v", err)
@@ -360,7 +481,6 @@ func main() {
 		render(w, r)
 	})
 
-	// Kept for compatibility with older bookmarks / hx-get="/search".
 	mux.HandleFunc("/search", render)
 
 	addr := ":" + port

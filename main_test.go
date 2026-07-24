@@ -3,6 +3,7 @@ package main
 import (
 	"reflect"
 	"testing"
+	"time"
 )
 
 func TestRepoFromURL(t *testing.T) {
@@ -92,18 +93,21 @@ func TestLanguageHints(t *testing.T) {
 
 func TestFilterPath(t *testing.T) {
 	tests := []struct {
-		q, lang, want string
+		q, lang, repo, sortMode, want string
 	}{
-		{"", "", "/"},
-		{"  ", "  ", "/"},
-		{"helm", "", "/?q=helm"},
-		{"", "go", "/?lang=go"},
-		{"helm", "go", "/?lang=go&q=helm"},
+		{"", "", "", "", "/"},
+		{"", "", "", "newest", "/"},
+		{"helm", "", "", "", "/?q=helm"},
+		{"", "go", "", "", "/?lang=go"},
+		{"helm", "go", "", "", "/?lang=go&q=helm"},
+		{"", "", "kubernetes-sigs/kind", "", "/?repo=kubernetes-sigs%2Fkind"},
+		{"", "", "", "comments", "/?sort=comments"},
+		{"x", "go", "kubernetes-sigs/kind", "repo", "/?lang=go&q=x&repo=kubernetes-sigs%2Fkind&sort=repo"},
 	}
 	for _, tt := range tests {
-		got := filterPath(tt.q, tt.lang)
+		got := filterPath(tt.q, tt.lang, tt.repo, tt.sortMode)
 		if got != tt.want {
-			t.Fatalf("filterPath(%q, %q) = %q, want %q", tt.q, tt.lang, got, tt.want)
+			t.Fatalf("filterPath(%q,%q,%q,%q) = %q, want %q", tt.q, tt.lang, tt.repo, tt.sortMode, got, tt.want)
 		}
 	}
 }
@@ -134,69 +138,93 @@ func TestFilterIssues(t *testing.T) {
 		name string
 		q    string
 		lang string
-		want []string // titles
+		repo string
+		want []string
 	}{
 		{
 			name: "empty filters returns all",
-			q:    "",
-			lang: "",
 			want: []string{"Add Go helper", "Improve docs for install", "Fix Python script"},
 		},
 		{
 			name: "query by title",
 			q:    "helper",
-			lang: "",
 			want: []string{"Add Go helper"},
 		},
 		{
-			name: "query by repo",
-			q:    "kubespray",
-			lang: "",
+			name: "filter by repo exact",
+			repo: "kubernetes-sigs/kubespray",
 			want: []string{"Fix Python script"},
 		},
 		{
 			name: "lang go via hints",
-			q:    "",
 			lang: "go",
 			want: []string{"Add Go helper"},
 		},
 		{
-			name: "lang docs via hints",
-			q:    "",
-			lang: "docs",
-			want: []string{"Improve docs for install"},
+			name: "combined query lang repo",
+			q:    "helper",
+			lang: "go",
+			repo: "kubernetes-sigs/kind",
+			want: []string{"Add Go helper"},
 		},
 		{
-			name: "combined query and lang",
-			q:    "fix",
-			lang: "python",
-			want: []string{"Fix Python script"},
-		},
-		{
-			name: "no matches",
-			q:    "nonexistent",
-			lang: "",
+			name: "repo mismatch yields empty",
+			q:    "helper",
+			repo: "kubernetes-sigs/kubespray",
 			want: []string{},
-		},
-		{
-			name: "whitespace query ignored as empty with lang",
-			q:    "   ",
-			lang: "python",
-			want: []string{"Fix Python script"},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := filterIssues(issues, tt.q, tt.lang)
+			got := filterIssues(issues, tt.q, tt.lang, tt.repo)
 			titles := make([]string, 0, len(got))
 			for _, issue := range got {
 				titles = append(titles, issue.Title)
 			}
 			if !reflect.DeepEqual(titles, tt.want) {
-				t.Fatalf("filterIssues(q=%q, lang=%q) titles = %v, want %v", tt.q, tt.lang, titles, tt.want)
+				t.Fatalf("filterIssues(...) titles = %v, want %v", titles, tt.want)
 			}
 		})
+	}
+}
+
+func TestSortIssues(t *testing.T) {
+	t1 := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+	t2 := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+	issues := []Issue{
+		{Title: "B", Repository: "kubernetes-sigs/z", Comments: 1, CreatedAt: t1, HTMLURL: "u1"},
+		{Title: "A", Repository: "kubernetes-sigs/a", Comments: 5, CreatedAt: t2, HTMLURL: "u2"},
+	}
+
+	newest := append([]Issue(nil), issues...)
+	sortIssues(newest, "newest")
+	if newest[0].Title != "A" {
+		t.Fatalf("newest: got %q first", newest[0].Title)
+	}
+
+	byComments := append([]Issue(nil), issues...)
+	sortIssues(byComments, "comments")
+	if byComments[0].Comments != 5 {
+		t.Fatalf("comments: got %d first", byComments[0].Comments)
+	}
+
+	byRepo := append([]Issue(nil), issues...)
+	sortIssues(byRepo, "repo")
+	if byRepo[0].Repository != "kubernetes-sigs/a" {
+		t.Fatalf("repo: got %q first", byRepo[0].Repository)
+	}
+}
+
+func TestUniqueRepos(t *testing.T) {
+	got := uniqueRepos([]Issue{
+		{Repository: "kubernetes-sigs/kind"},
+		{Repository: "kubernetes-sigs/cluster-api"},
+		{Repository: "kubernetes-sigs/kind"},
+	})
+	want := []string{"kubernetes-sigs/cluster-api", "kubernetes-sigs/kind"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("uniqueRepos = %v, want %v", got, want)
 	}
 }
 
@@ -221,4 +249,23 @@ func TestCacheGetSet(t *testing.T) {
 	if again[0].Title != "one" {
 		t.Fatal("Get should return a copy, not shared slice")
 	}
+
+	h := c.Health()
+	if h.Status != "ok" || h.Issues != 1 {
+		t.Fatalf("health = %+v", h)
+	}
 }
+
+func TestCacheHealthDegraded(t *testing.T) {
+	c := &Cache{}
+	c.Set([]Issue{{Title: "one"}}, nil)
+	c.Set(nil, fmtError("boom"))
+	h := c.Health()
+	if h.Status != "degraded" || h.Error != "boom" || h.Issues != 1 {
+		t.Fatalf("health = %+v", h)
+	}
+}
+
+type fmtError string
+
+func (e fmtError) Error() string { return string(e) }
