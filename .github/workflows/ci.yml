@@ -23,7 +23,7 @@ jobs:
         run: CGO_ENABLED=0 go build -o /tmp/k8s-scout ./cmd/k8s-scout
 
       - name: golangci-lint
-        uses: golangci/golangci-lint-action@v8
+        uses: golangci/golangci-lint-action@v9
         with:
           version: v2.1
 
