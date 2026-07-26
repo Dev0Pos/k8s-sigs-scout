@@ -96,7 +96,17 @@
             <option value="title" {{ if eq .Sort "title" }}selected{{ end }}>Title</option>
           </select>
         </label>
+        <div class="flex items-end">
+          <button
+            type="button"
+            id="copy-filter-url"
+            class="rounded-lg border border-zinc-700 px-3 py-2.5 text-sm text-zinc-300 hover:border-k8s hover:text-k8s"
+            title="Copy current filter URL"
+          >Copy URL</button>
+        </div>
       </form>
+
+      <p id="copy-filter-status" class="mt-2 hidden text-xs text-zinc-500" aria-live="polite"></p>
 
       <div id="results" class="mt-8">
         {{ template "results.html" . }}
@@ -128,5 +138,23 @@
       </div>
     </footer>
   </div>
+  <script>
+    (function () {
+      const btn = document.getElementById('copy-filter-url');
+      const status = document.getElementById('copy-filter-status');
+      if (!btn || !status) return;
+      btn.addEventListener('click', async () => {
+        try {
+          await navigator.clipboard.writeText(window.location.href);
+          status.textContent = 'Filter URL copied';
+          status.classList.remove('hidden');
+          setTimeout(() => status.classList.add('hidden'), 2000);
+        } catch (_) {
+          status.textContent = 'Could not copy URL';
+          status.classList.remove('hidden');
+        }
+      });
+    })();
+  </script>
 </body>
 </html>

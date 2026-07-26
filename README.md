@@ -1,5 +1,10 @@
 # k8s-sigs-scout
 
+[![CI](https://github.com/Dev0Pos/k8s-sigs-scout/actions/workflows/ci.yml/badge.svg)](https://github.com/Dev0Pos/k8s-sigs-scout/actions/workflows/ci.yml)
+[![Release](https://github.com/Dev0Pos/k8s-sigs-scout/actions/workflows/release.yml/badge.svg)](https://github.com/Dev0Pos/k8s-sigs-scout/actions/workflows/release.yml)
+[![Go](https://img.shields.io/badge/Go-1.26+-00ADD8?logo=go&logoColor=white)](https://go.dev/)
+[![GHCR](https://img.shields.io/badge/ghcr.io-k8s--sigs--scout-326ce5)](https://github.com/Dev0Pos/k8s-sigs-scout/pkgs/container/k8s-sigs-scout)
+
 Dashboard for browsing unassigned **good first issue** tasks from the GitHub org [`kubernetes-sigs`](https://github.com/kubernetes-sigs).
 
 ## Requirements
@@ -35,7 +40,7 @@ PORT=3000 go run ./cmd/k8s-scout
 
 On push/PR: tests, build, `golangci-lint`, Docker + Trivy.
 
-On `v*` tags: build/push to GHCR (`ghcr.io/dev0pos/k8s-sigs-scout`).
+On `v*` tags: multi-arch (`linux/amd64`, `linux/arm64`) build/push to GHCR (`ghcr.io/dev0pos/k8s-sigs-scout`).
 
 ## Docker
 
@@ -53,5 +58,5 @@ docker run --rm -p 8080:8080 ghcr.io/dev0pos/k8s-sigs-scout:latest
 ## How it works
 
 1. Background refresh pulls open, unassigned `good first issue` items (paginated) into RAM every 15 minutes — browsers never hit GitHub directly.
-2. UI is Go `html/template` + Tailwind CDN + HTMX with deep links: `q`, `lang`, `repo`, `sort`, `page` (10 issues per page).
+2. UI is Go `html/template` + Tailwind CDN + HTMX with deep links: `q`, `lang`, `repo`, `sort`, `page` (10 issues per page). Use **Copy URL** to share the current filter.
 3. `/healthz` exposes cache status for probes.

@@ -14,11 +14,26 @@ import (
 )
 
 const (
-	searchQuery = `org:kubernetes-sigs is:issue is:open label:"good first issue" no:assignee`
-	perPage     = 100
-	maxPages    = 10 // GitHub Search API caps around 1000 results
-	userAgent   = "k8s-sigs-scout"
+	searchQuery    = `org:kubernetes-sigs is:issue is:open label:"good first issue" no:assignee`
+	perPage        = 100
+	maxPages       = 10 // GitHub Search API caps around 1000 results
+	userAgent      = "k8s-sigs-scout"
+	defaultBaseURL = "https://api.github.com"
 )
+
+// Client talks to the GitHub Search API.
+type Client struct {
+	HTTP    *http.Client
+	BaseURL string
+	// PerPage overrides the default page size (useful in tests).
+	PerPage int
+}
+
+// DefaultClient is used by FetchIssues.
+var DefaultClient = &Client{
+	HTTP:    &http.Client{Timeout: 30 * time.Second},
+	BaseURL: defaultBaseURL,
+}
 
 type searchResponse struct {
 	TotalCount int `json:"total_count"`
@@ -34,20 +49,37 @@ type searchResponse struct {
 	} `json:"items"`
 }
 
-// FetchIssues loads all paginated good-first-issue results for kubernetes-sigs.
+// FetchIssues loads all paginated good-first-issue results using DefaultClient.
 func FetchIssues() ([]issue.Issue, error) {
-	client := &http.Client{Timeout: 30 * time.Second}
+	return DefaultClient.FetchIssues()
+}
+
+// FetchIssues loads all paginated good-first-issue results for kubernetes-sigs.
+func (c *Client) FetchIssues() ([]issue.Issue, error) {
+	httpClient := c.HTTP
+	if httpClient == nil {
+		httpClient = &http.Client{Timeout: 30 * time.Second}
+	}
+	base := c.BaseURL
+	if base == "" {
+		base = defaultBaseURL
+	}
+	pageSize := c.PerPage
+	if pageSize <= 0 {
+		pageSize = perPage
+	}
+
 	var all []issue.Issue
 	seen := map[string]bool{}
 
 	for page := 1; page <= maxPages; page++ {
-		u, err := url.Parse("https://api.github.com/search/issues")
+		u, err := url.Parse(base + "/search/issues")
 		if err != nil {
 			return nil, err
 		}
 		q := u.Query()
 		q.Set("q", searchQuery)
-		q.Set("per_page", strconv.Itoa(perPage))
+		q.Set("per_page", strconv.Itoa(pageSize))
 		q.Set("page", strconv.Itoa(page))
 		q.Set("sort", "created")
 		q.Set("order", "desc")
@@ -60,7 +92,7 @@ func FetchIssues() ([]issue.Issue, error) {
 		req.Header.Set("Accept", "application/vnd.github+json")
 		req.Header.Set("User-Agent", userAgent)
 
-		resp, err := client.Do(req)
+		resp, err := httpClient.Do(req)
 		if err != nil {
 			return nil, err
 		}
@@ -105,7 +137,7 @@ func FetchIssues() ([]issue.Issue, error) {
 		log.Printf("fetched page %d: +%d items (cache so far %d / reported total %d)",
 			page, len(payload.Items), len(all), payload.TotalCount)
 
-		if len(payload.Items) < perPage || len(all) >= payload.TotalCount {
+		if len(payload.Items) < pageSize || len(all) >= payload.TotalCount {
 			break
 		}
 	}

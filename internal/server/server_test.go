@@ -69,3 +69,20 @@ func TestIndexDeepLink(t *testing.T) {
 		t.Fatalf("repo not selected in form")
 	}
 }
+
+func TestIndexHasCopyURLButton(t *testing.T) {
+	srv, err := server.New(fakeStore{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d", rec.Code)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, `id="copy-filter-url"`) {
+		t.Fatal("missing copy filter URL button")
+	}
+}
