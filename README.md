@@ -42,6 +42,8 @@ On push/PR: tests, build, `golangci-lint`, Docker + Trivy.
 
 On `v*` tags: multi-arch (`linux/amd64`, `linux/arm64`) build/push to GHCR (`ghcr.io/dev0pos/k8s-sigs-scout`).
 
+Dependabot opens weekly PRs for GitHub Actions and Docker base images.
+
 ## Docker
 
 ```bash
@@ -59,4 +61,4 @@ docker run --rm -p 8080:8080 ghcr.io/dev0pos/k8s-sigs-scout:latest
 
 1. Background refresh pulls open, unassigned `good first issue` items (paginated) into RAM every 15 minutes — browsers never hit GitHub directly.
 2. UI is Go `html/template` + Tailwind CDN + HTMX with deep links: `q`, `lang`, `repo`, `sort`, `page` (10 issues per page). Use **Copy URL** to share the current filter.
-3. `/healthz` exposes cache status for probes.
+3. `/healthz` exposes cache status for probes. If a refresh fails but stale data remains, the UI shows a **degraded** warning banner.

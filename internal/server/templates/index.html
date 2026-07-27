@@ -36,6 +36,12 @@
     </header>
 
     <main class="mx-auto w-full max-w-5xl flex-1 px-4 py-8">
+      {{ if eq .CacheStatus "degraded" }}
+      <div class="mb-6 rounded-lg border border-amber-900/50 bg-amber-950/40 px-4 py-3 text-sm text-amber-200/90" role="status">
+        Showing cached data — last GitHub refresh failed{{ if .CacheError }}: <span class="text-amber-100/80">{{ .CacheError }}</span>{{ end }}.
+      </div>
+      {{ end }}
+
       <form
         class="flex flex-col gap-3 lg:flex-row lg:flex-wrap lg:items-end"
         hx-get="/"

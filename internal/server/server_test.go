@@ -86,3 +86,24 @@ func TestIndexHasCopyURLButton(t *testing.T) {
 		t.Fatal("missing copy filter URL button")
 	}
 }
+
+func TestIndexShowsDegradedBanner(t *testing.T) {
+	store := fakeStore{
+		issues: []issue.Issue{{Title: "One", Repository: "kubernetes-sigs/kind", HTMLURL: "https://example.com/1"}},
+		health: cache.Health{Status: "degraded", Issues: 1, Error: "GitHub API returned 403 Forbidden"},
+	}
+	srv, err := server.New(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	body := rec.Body.String()
+	if !strings.Contains(body, "Showing cached data") {
+		t.Fatal("missing degraded banner")
+	}
+	if !strings.Contains(body, "403 Forbidden") {
+		t.Fatal("missing cache error detail")
+	}
+}

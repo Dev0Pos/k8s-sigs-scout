@@ -54,54 +54,59 @@ func (s *Server) Handler() http.Handler {
 }
 
 type pageData struct {
-	Issues    []issue.Issue
-	Repos     []string
-	Query     string
-	Lang      string
-	Repo      string
-	Sort      string
-	UpdatedAt string
-	Count     int // issues on this page
-	Matched   int // after filters, before UI pagination
-	Total     int // full cache size
-	Page      int
-	Pages     int
-	From      int
-	To        int
-	HasPrev   bool
-	HasNext   bool
-	PrevURL   string
-	NextURL   string
-	Error     string
-	K8sBlue   string
+	Issues      []issue.Issue
+	Repos       []string
+	Query       string
+	Lang        string
+	Repo        string
+	Sort        string
+	UpdatedAt   string
+	Count       int // issues on this page
+	Matched     int // after filters, before UI pagination
+	Total       int // full cache size
+	Page        int
+	Pages       int
+	From        int
+	To          int
+	HasPrev     bool
+	HasNext     bool
+	PrevURL     string
+	NextURL     string
+	Error       string
+	CacheStatus string
+	CacheError  string
+	K8sBlue     string
 }
 
 func (s *Server) buildPageData(q, lang, repo, sortMode string, page int) pageData {
 	issues, updatedAt, err := s.store.Get()
+	health := s.store.HealthSnapshot()
 	sortMode = filter.NormalizeSort(sortMode)
 	filtered := filter.Issues(issues, q, lang, repo)
 	filter.SortIssues(filtered, sortMode)
 	pageIssues, info := filter.Paginate(filtered, page)
 
 	data := pageData{
-		Issues:  pageIssues,
-		Repos:   filter.UniqueRepos(issues),
-		Query:   q,
-		Lang:    lang,
-		Repo:    repo,
-		Sort:    sortMode,
-		Count:   len(pageIssues),
-		Matched: info.Matched,
-		Total:   len(issues),
-		Page:    info.Page,
-		Pages:   info.Pages,
-		From:    info.From,
-		To:      info.To,
-		HasPrev: info.Page > 1,
-		HasNext: info.Page < info.Pages,
-		PrevURL: filter.Path(q, lang, repo, sortMode, info.Page-1),
-		NextURL: filter.Path(q, lang, repo, sortMode, info.Page+1),
-		K8sBlue: k8sBlue,
+		Issues:      pageIssues,
+		Repos:       filter.UniqueRepos(issues),
+		Query:       q,
+		Lang:        lang,
+		Repo:        repo,
+		Sort:        sortMode,
+		Count:       len(pageIssues),
+		Matched:     info.Matched,
+		Total:       len(issues),
+		Page:        info.Page,
+		Pages:       info.Pages,
+		From:        info.From,
+		To:          info.To,
+		HasPrev:     info.Page > 1,
+		HasNext:     info.Page < info.Pages,
+		PrevURL:     filter.Path(q, lang, repo, sortMode, info.Page-1),
+		NextURL:     filter.Path(q, lang, repo, sortMode, info.Page+1),
+		CacheStatus: health.Status,
+		CacheError:  health.Error,
+		K8sBlue:     k8sBlue,
 	}
 	if !updatedAt.IsZero() {
 		data.UpdatedAt = updatedAt.Format(time.RFC822)
