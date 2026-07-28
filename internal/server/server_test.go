@@ -85,6 +85,31 @@ func TestIndexHasCopyURLButton(t *testing.T) {
 	if !strings.Contains(body, `id="copy-filter-url"`) {
 		t.Fatal("missing copy filter URL button")
 	}
+	if !strings.Contains(body, `id="new-since-count"`) || !strings.Contains(body, `id="mark-seen"`) {
+		t.Fatal("missing new-since-visit header controls")
+	}
+}
+
+func TestResultsExposeCreatedAttr(t *testing.T) {
+	created := time.Date(2025, 6, 1, 12, 0, 0, 0, time.UTC)
+	store := fakeStore{issues: []issue.Issue{
+		{Title: "Fresh", Repository: "kubernetes-sigs/kind", HTMLURL: "https://example.com/1", CreatedAt: created},
+	}}
+	srv, err := server.New(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("HX-Request", "true")
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	body := rec.Body.String()
+	if !strings.Contains(body, `data-created="2025-06-01T12:00:00Z"`) {
+		t.Fatalf("missing data-created attr: %s", body)
+	}
+	if !strings.Contains(body, `data-new-badge`) {
+		t.Fatal("missing new badge placeholder")
+	}
 }
 
 func TestIndexShowsDegradedBanner(t *testing.T) {

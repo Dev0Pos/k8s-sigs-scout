@@ -17,21 +17,94 @@
     }
   </script>
   <script src="https://unpkg.com/htmx.org@2.0.4"></script>
+  <style>
+    @keyframes scout-shimmer {
+      0% { background-position: 0% 50%; }
+      100% { background-position: 200% 50%; }
+    }
+    @keyframes scout-pulse-glow {
+      0%, 100% { opacity: 0.45; transform: scale(1); }
+      50% { opacity: 0.85; transform: scale(1.04); }
+    }
+    @keyframes scout-scan {
+      0% { transform: translateX(-120%); opacity: 0; }
+      20% { opacity: 1; }
+      100% { transform: translateX(220%); opacity: 0; }
+    }
+    @keyframes scout-fade-up {
+      from { opacity: 0; transform: translateY(6px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+    .scout-top-line {
+      background: linear-gradient(90deg, #1e3a8a, #326ce5, #60a5fa, #326ce5, #1e3a8a);
+      background-size: 200% 100%;
+      animation: scout-shimmer 4s linear infinite;
+    }
+    .scout-glow {
+      animation: scout-pulse-glow 5s ease-in-out infinite;
+    }
+    .scout-scan {
+      animation: scout-scan 3.5s ease-in-out infinite;
+    }
+    .issue-enter {
+      animation: scout-fade-up 0.35s ease-out both;
+    }
+    .issue-new {
+      border-color: rgba(50, 108, 229, 0.55) !important;
+      box-shadow: 0 0 0 1px rgba(50, 108, 229, 0.25), 0 0 24px rgba(50, 108, 229, 0.12);
+      background: linear-gradient(135deg, rgba(50, 108, 229, 0.12), rgba(24, 24, 27, 0.85) 40%) !important;
+    }
+    .issue-new-badge {
+      animation: scout-fade-up 0.4s ease-out both;
+    }
+  </style>
 </head>
 <body class="h-full bg-zinc-950 text-zinc-100 antialiased">
   <div class="flex min-h-full flex-col">
-    <header class="border-b border-zinc-800 bg-zinc-900/80 backdrop-blur">
-      <div class="mx-auto max-w-5xl px-4 py-6">
-        <div class="flex items-baseline gap-3">
-          <h1 class="text-2xl font-semibold tracking-tight">
-            <span class="text-k8s">k8s-sigs</span>-scout
-          </h1>
-          <span class="text-sm text-zinc-500">unassigned good first issues</span>
+    <div class="scout-top-line h-1 w-full" aria-hidden="true"></div>
+    <header class="relative overflow-hidden border-b border-zinc-800/80 bg-zinc-950/90 backdrop-blur">
+      <div class="pointer-events-none absolute inset-0" aria-hidden="true">
+        <div class="scout-glow absolute -left-24 -top-24 h-64 w-64 rounded-full bg-k8s/20 blur-3xl"></div>
+        <div class="absolute -right-16 top-0 h-40 w-40 rounded-full bg-sky-500/10 blur-3xl"></div>
+        <div class="absolute inset-x-0 top-0 h-px overflow-hidden">
+          <div class="scout-scan h-px w-1/3 bg-gradient-to-r from-transparent via-k8s to-transparent"></div>
         </div>
-        <p class="mt-2 text-sm text-zinc-400">
-          Filters run against an in-memory cache (GitHub API refresh every 15&nbsp;min).
-          {{ if .UpdatedAt }}Last refresh: <span class="text-zinc-300">{{ .UpdatedAt }}</span>{{ end }}
-        </p>
+        <div class="absolute inset-0 opacity-[0.04]" style="background-image: linear-gradient(rgba(255,255,255,.12) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,.12) 1px, transparent 1px); background-size: 28px 28px;"></div>
+      </div>
+
+      <div class="relative mx-auto max-w-5xl px-4 py-7">
+        <div class="flex flex-wrap items-start justify-between gap-4">
+          <div>
+            <p class="mb-1 text-[11px] font-semibold uppercase tracking-[0.22em] text-k8s/90">kubernetes-sigs · scout</p>
+            <div class="flex flex-wrap items-baseline gap-3">
+              <h1 class="text-3xl font-semibold tracking-tight">
+                <span class="text-k8s">k8s-sigs</span><span class="text-zinc-100">-scout</span>
+              </h1>
+              <span class="text-sm text-zinc-500">unassigned good first issues</span>
+            </div>
+            <p class="mt-2 max-w-xl text-sm text-zinc-400">
+              In-memory cache, HTMX filters, zero PAT.
+              {{ if .UpdatedAt }}Last refresh: <span class="text-zinc-200">{{ .UpdatedAt }}</span>{{ end }}
+            </p>
+          </div>
+
+          <div class="flex flex-wrap items-center gap-2">
+            <div class="rounded-lg border border-zinc-700/80 bg-zinc-900/70 px-3 py-2 text-center">
+              <div class="text-[10px] uppercase tracking-wide text-zinc-500">Cached</div>
+              <div class="text-lg font-semibold tabular-nums text-zinc-100" data-stat="total">{{ .Total }}</div>
+            </div>
+            <div class="rounded-lg border border-k8s/40 bg-k8s/10 px-3 py-2 text-center shadow-[0_0_20px_rgba(50,108,229,0.15)]">
+              <div class="text-[10px] uppercase tracking-wide text-k8s/80">New since visit</div>
+              <div id="new-since-count" class="text-lg font-semibold tabular-nums text-k8s">—</div>
+            </div>
+            <button
+              type="button"
+              id="mark-seen"
+              class="rounded-lg border border-zinc-700 px-3 py-2 text-xs text-zinc-300 transition hover:border-k8s hover:text-k8s"
+              title="Mark current issues as seen"
+            >Mark seen</button>
+          </div>
+        </div>
       </div>
     </header>
 
@@ -146,20 +219,79 @@
   </div>
   <script>
     (function () {
+      const VISIT_KEY = 'k8s-scout:lastVisit';
+
+      function getLastVisit() {
+        const raw = localStorage.getItem(VISIT_KEY);
+        if (!raw) return null;
+        const t = Date.parse(raw);
+        return Number.isFinite(t) ? t : null;
+      }
+
+      function markSeen() {
+        localStorage.setItem(VISIT_KEY, new Date().toISOString());
+        applyNewMarkers();
+      }
+
+      function applyNewMarkers() {
+        const last = getLastVisit();
+        const cards = document.querySelectorAll('[data-created]');
+        let n = 0;
+        cards.forEach((el, i) => {
+          const created = Date.parse(el.getAttribute('data-created') || '');
+          const isNew = last != null && Number.isFinite(created) && created > last;
+          el.classList.toggle('issue-new', isNew);
+          el.classList.add('issue-enter');
+          el.style.animationDelay = (i * 40) + 'ms';
+          const badge = el.querySelector('[data-new-badge]');
+          if (badge) badge.classList.toggle('hidden', !isNew);
+          if (isNew) n += 1;
+        });
+        const counter = document.getElementById('new-since-count');
+        if (counter) {
+          if (last == null) {
+            counter.textContent = '—';
+            counter.title = 'Visit again later to see what is new';
+          } else {
+            counter.textContent = String(n);
+            counter.title = n + ' issue(s) created since your last visit (this page)';
+          }
+        }
+      }
+
       const btn = document.getElementById('copy-filter-url');
       const status = document.getElementById('copy-filter-status');
-      if (!btn || !status) return;
-      btn.addEventListener('click', async () => {
-        try {
-          await navigator.clipboard.writeText(window.location.href);
-          status.textContent = 'Filter URL copied';
-          status.classList.remove('hidden');
-          setTimeout(() => status.classList.add('hidden'), 2000);
-        } catch (_) {
-          status.textContent = 'Could not copy URL';
-          status.classList.remove('hidden');
+      if (btn && status) {
+        btn.addEventListener('click', async () => {
+          try {
+            await navigator.clipboard.writeText(window.location.href);
+            status.textContent = 'Filter URL copied';
+            status.classList.remove('hidden');
+            setTimeout(() => status.classList.add('hidden'), 2000);
+          } catch (_) {
+            status.textContent = 'Could not copy URL';
+            status.classList.remove('hidden');
+          }
+        });
+      }
+
+      const markBtn = document.getElementById('mark-seen');
+      if (markBtn) markBtn.addEventListener('click', markSeen);
+
+      document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'hidden') {
+          localStorage.setItem(VISIT_KEY, new Date().toISOString());
         }
       });
+      window.addEventListener('beforeunload', () => {
+        localStorage.setItem(VISIT_KEY, new Date().toISOString());
+      });
+
+      document.body.addEventListener('htmx:afterSwap', (ev) => {
+        if (ev.target && ev.target.id === 'results') applyNewMarkers();
+      });
+
+      applyNewMarkers();
     })();
   </script>
 </body>
