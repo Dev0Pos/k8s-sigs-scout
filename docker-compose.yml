@@ -1,0 +1,7 @@
+services:
+  k8s-scout:
+    build: .
+    image: ghcr.io/dev0pos/k8s-sigs-scout:latest
+    ports:
+      - "${PORT:-8080}:8080"
+    restart: unless-stopped

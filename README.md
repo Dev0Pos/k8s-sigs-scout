@@ -57,6 +57,21 @@ Or from GHCR:
 docker run --rm -p 8080:8080 ghcr.io/dev0pos/k8s-sigs-scout:latest
 ```
 
+## Docker Compose
+
+```bash
+docker compose up --build
+```
+
+Uses the local Dockerfile by default and tags the image as `ghcr.io/dev0pos/k8s-sigs-scout:latest`. To run a published image without building:
+
+```bash
+docker compose pull
+docker compose up
+```
+
+Optional port override: `PORT=3000 docker compose up --build`.
+
 ## How it works
 
 1. Background refresh pulls open, unassigned `good first issue` items (paginated) into RAM every 15 minutes — browsers never hit GitHub directly.
