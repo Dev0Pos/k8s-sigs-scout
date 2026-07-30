@@ -1,6 +1,6 @@
 # Kubernetes deploy (scout + Loki + Grafana)
 
-Self-contained stack in namespace `k8s-scout` (does **not** use the DataWalk monitoring stack).
+Self-contained stack in namespace `k8s-scout` (own Loki/Grafana; does not depend on other cluster monitoring).
 
 | Component | Purpose | Access |
 |-----------|---------|--------|
@@ -32,10 +32,23 @@ kubectl -n k8s-scout create secret generic k8s-scout-github \
 kubectl -n k8s-scout rollout restart deploy/k8s-scout
 ```
 
-## URLs (via Tailscale)
+## URLs
 
-- Scout: http://100.76.137.100:30808  
-- Grafana: http://100.76.137.100:30300  
+NodePorts are open on the host (`30808` / `30300`), but Tailscale ACLs may block them from your laptop. Easiest access via SSH tunnels:
+
+```bash
+ssh -N \
+  -L 30808:127.0.0.1:30808 \
+  -L 30300:127.0.0.1:30300 \
+  root@100.76.137.100
+```
+
+Then open:
+
+- Scout: http://127.0.0.1:30808  
+- Grafana: http://127.0.0.1:30300  (`admin` / `scout`)
+
+On the cluster host itself (or LAN): http://192.168.68.103:30808 and `:30300`.
 
 In Grafana → **Explore** → Loki query:
 
