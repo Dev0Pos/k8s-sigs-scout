@@ -2,7 +2,7 @@
 package cache
 
 import (
-	"log"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -89,14 +89,15 @@ func StartRefresher(c *Cache, interval time.Duration) {
 		interval = DefaultInterval
 	}
 	refresh := func() {
+		start := time.Now()
 		issues, err := github.FetchIssues()
 		if err != nil {
-			log.Printf("cache refresh failed: %v", err)
+			slog.Warn("cache refresh failed", "err", err, "duration_ms", time.Since(start).Milliseconds())
 			c.Set(nil, err)
 			return
 		}
 		c.Set(issues, nil)
-		log.Printf("cache refreshed: %d issues", len(issues))
+		slog.Info("cache refreshed", "issues", len(issues), "duration_ms", time.Since(start).Milliseconds())
 	}
 
 	refresh()

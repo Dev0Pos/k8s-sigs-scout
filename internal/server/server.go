@@ -5,7 +5,7 @@ import (
 	"embed"
 	"encoding/json"
 	"html/template"
-	"log"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"time"
@@ -13,6 +13,7 @@ import (
 	"k8s-scout/internal/cache"
 	"k8s-scout/internal/filter"
 	"k8s-scout/internal/issue"
+	"k8s-scout/internal/logging"
 )
 
 const k8sBlue = "#326ce5"
@@ -44,13 +45,13 @@ func New(store Store) (*Server, error) {
 	return &Server{store: store, tmpl: tmpl}, nil
 }
 
-// Handler returns the root mux.
+// Handler returns the root mux wrapped with HTTP access logging.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", s.handleHealthz)
 	mux.HandleFunc("/", s.handleIndex)
 	mux.HandleFunc("/search", s.handleIndex)
-	return mux
+	return logging.AccessLog(mux)
 }
 
 type pageData struct {
@@ -151,7 +152,7 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 		name = "results.html"
 	}
 	if err := s.tmpl.ExecuteTemplate(w, name, data); err != nil {
-		log.Printf("template error: %v", err)
+		slog.Error("template error", "err", err, "template", name)
 		http.Error(w, "template error", http.StatusInternalServerError)
 	}
 }

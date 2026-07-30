@@ -20,6 +20,7 @@ internal/
   github/               # GitHub Search API client (paginated)
   cache/                # in-memory cache + background refresh
   filter/               # filter / sort / deep-link paths
+  logging/              # slog setup + HTTP access log middleware
   server/               # HTTP handlers + embedded templates
 ```
 
@@ -36,11 +37,20 @@ Open http://localhost:8080 — health: http://localhost:8080/healthz
 PORT=3000 go run ./cmd/k8s-scout
 ```
 
-Optional `GITHUB_TOKEN` (PAT or fine-grained token) raises Search API rate limits; without it the app stays unauthenticated (~60 req/h per IP). The token is only used by the backend cache refresher — never exposed to the browser.
+Optional `GITHUB_TOKEN` (PAT or fine-grained token) raises Search API rate limits; without it the app stays unauthenticated (~60 req/h per IP). The token is only used by the backend cache refresher — never exposed to the browser or logs.
 
 ```bash
 GITHUB_TOKEN=ghp_xxx go run ./cmd/k8s-scout
 ```
+
+Logging uses Go `log/slog` (JSON by default). Tune with:
+
+```bash
+LOG_FORMAT=json LOG_LEVEL=info go run ./cmd/k8s-scout   # container-friendly default
+LOG_FORMAT=text LOG_LEVEL=debug go run ./cmd/k8s-scout   # local debugging
+```
+
+HTTP access logs include method/path/status/duration (not `/healthz`). The token value is never logged.
 
 ## CI (GitHub Actions)
 

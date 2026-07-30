@@ -4,7 +4,7 @@ package github
 import (
 	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"os"
@@ -154,8 +154,12 @@ func (c *Client) FetchIssues() ([]issue.Issue, error) {
 			})
 		}
 
-		log.Printf("fetched page %d: +%d items (cache so far %d / reported total %d)",
-			page, len(payload.Items), len(all), payload.TotalCount)
+		slog.Debug("fetched github search page",
+			"page", page,
+			"items", len(payload.Items),
+			"cache_size", len(all),
+			"reported_total", payload.TotalCount,
+		)
 
 		if len(payload.Items) < pageSize || len(all) >= payload.TotalCount {
 			break

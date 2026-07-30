@@ -7,4 +7,6 @@ services:
     environment:
       # Optional: raises GitHub Search API rate limits (~60/h → ~5000/h).
       GITHUB_TOKEN: ${GITHUB_TOKEN:-}
+      LOG_FORMAT: ${LOG_FORMAT:-json}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
     restart: unless-stopped
