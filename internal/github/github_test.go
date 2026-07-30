@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -75,6 +76,7 @@ func TestClientFetchIssuesPaginated(t *testing.T) {
 
 func TestClientFetchIssuesHTTPError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("X-RateLimit-Remaining", "0")
 		http.Error(w, "nope", http.StatusForbidden)
 	}))
 	t.Cleanup(srv.Close)
@@ -83,6 +85,36 @@ func TestClientFetchIssuesHTTPError(t *testing.T) {
 	_, err := client.FetchIssues()
 	if err == nil {
 		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "rate-limit-remaining=0") {
+		t.Fatalf("error %q, want rate-limit-remaining", err.Error())
+	}
+}
+
+func TestClientSendsBearerToken(t *testing.T) {
+	var gotAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"total_count": 0,
+			"items":       []any{},
+		})
+	}))
+	t.Cleanup(srv.Close)
+
+	client := &github.Client{
+		HTTP:    srv.Client(),
+		BaseURL: srv.URL,
+		Token:   "ghs_test_token",
+		PerPage: 1,
+	}
+	_, err := client.FetchIssues()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotAuth != "Bearer ghs_test_token" {
+		t.Fatalf("Authorization = %q", gotAuth)
 	}
 }
 

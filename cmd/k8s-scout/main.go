@@ -7,6 +7,7 @@ import (
 	"os"
 
 	"k8s-scout/internal/cache"
+	"k8s-scout/internal/github"
 	"k8s-scout/internal/server"
 )
 
@@ -14,6 +15,12 @@ func main() {
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "8080"
+	}
+
+	if github.ConfigureDefaultFromEnv() {
+		log.Printf("GitHub API auth: enabled (GITHUB_TOKEN set)")
+	} else {
+		log.Printf("GitHub API auth: disabled (unauthenticated rate limits)")
 	}
 
 	c := &cache.Cache{}

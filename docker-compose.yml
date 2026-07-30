@@ -4,4 +4,7 @@ services:
     image: ghcr.io/dev0pos/k8s-sigs-scout:latest
     ports:
       - "${PORT:-8080}:8080"
+    environment:
+      # Optional: raises GitHub Search API rate limits (~60/h → ~5000/h).
+      GITHUB_TOKEN: ${GITHUB_TOKEN:-}
     restart: unless-stopped

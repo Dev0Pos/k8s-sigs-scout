@@ -36,6 +36,12 @@ Open http://localhost:8080 — health: http://localhost:8080/healthz
 PORT=3000 go run ./cmd/k8s-scout
 ```
 
+Optional `GITHUB_TOKEN` (PAT or fine-grained token) raises Search API rate limits; without it the app stays unauthenticated (~60 req/h per IP). The token is only used by the backend cache refresher — never exposed to the browser.
+
+```bash
+GITHUB_TOKEN=ghp_xxx go run ./cmd/k8s-scout
+```
+
 ## CI (GitHub Actions)
 
 On push/PR: tests, build, `golangci-lint`, Docker + Trivy.
@@ -71,6 +77,12 @@ docker compose up
 ```
 
 Optional port override: `PORT=3000 docker compose up --build`.
+
+Optional GitHub auth (recommended for shared hosts):
+
+```bash
+GITHUB_TOKEN=ghp_xxx docker compose up --build
+```
 
 ## How it works
 

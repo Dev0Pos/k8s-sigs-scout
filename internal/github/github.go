@@ -7,7 +7,9 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"k8s-scout/internal/issue"
@@ -25,6 +27,9 @@ const (
 type Client struct {
 	HTTP    *http.Client
 	BaseURL string
+	// Token is an optional GitHub PAT / fine-grained token (Authorization: Bearer).
+	// Without it, unauthenticated Search limits apply (~60 req/h per IP).
+	Token string
 	// PerPage overrides the default page size (useful in tests).
 	PerPage int
 }
@@ -33,6 +38,14 @@ type Client struct {
 var DefaultClient = &Client{
 	HTTP:    &http.Client{Timeout: 30 * time.Second},
 	BaseURL: defaultBaseURL,
+}
+
+// ConfigureDefaultFromEnv sets DefaultClient.Token from GITHUB_TOKEN if present.
+// Returns whether auth is enabled (token non-empty). Does not log the token.
+func ConfigureDefaultFromEnv() bool {
+	tok := strings.TrimSpace(os.Getenv("GITHUB_TOKEN"))
+	DefaultClient.Token = tok
+	return tok != ""
 }
 
 type searchResponse struct {
@@ -91,6 +104,9 @@ func (c *Client) FetchIssues() ([]issue.Issue, error) {
 		}
 		req.Header.Set("Accept", "application/vnd.github+json")
 		req.Header.Set("User-Agent", userAgent)
+		if c.Token != "" {
+			req.Header.Set("Authorization", "Bearer "+c.Token)
+		}
 
 		resp, err := httpClient.Do(req)
 		if err != nil {
@@ -98,7 +114,11 @@ func (c *Client) FetchIssues() ([]issue.Issue, error) {
 		}
 
 		if resp.StatusCode != http.StatusOK {
+			remaining := resp.Header.Get("X-RateLimit-Remaining")
 			_ = resp.Body.Close()
+			if remaining != "" {
+				return nil, fmt.Errorf("GitHub API returned %s (page %d, rate-limit-remaining=%s)", resp.Status, page, remaining)
+			}
 			return nil, fmt.Errorf("GitHub API returned %s (page %d)", resp.Status, page)
 		}
 
