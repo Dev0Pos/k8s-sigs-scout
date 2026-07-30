@@ -60,6 +60,10 @@ On `v*` tags: Trivy gate (**0 vulns**, same as CI) on an amd64 image **before** 
 
 Dependabot opens weekly PRs for GitHub Actions and Docker base images.
 
+## Kubernetes (Loki + Grafana)
+
+See [`deploy/k8s/README.md`](deploy/k8s/README.md) for a self-contained install (scout + Loki + Promtail + Grafana) with NodePorts for Tailscale access.
+
 ## Docker
 
 ```bash
