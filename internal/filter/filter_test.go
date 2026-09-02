@@ -50,6 +50,14 @@ func TestPaginate(t *testing.T) {
 	if infoC.Page != 3 || len(clamped) != 5 {
 		t.Fatalf("clamp: len=%d info=%+v", len(clamped), infoC)
 	}
+	low, infoLow := filter.Paginate(issues, 0)
+	if infoLow.Page != 1 || len(low) != 10 {
+		t.Fatalf("page<1: len=%d info=%+v", len(low), infoLow)
+	}
+	empty, infoE := filter.Paginate(nil, 3)
+	if empty != nil || infoE.Page != 1 || infoE.Pages != 1 || infoE.From != 0 || infoE.To != 0 || infoE.Matched != 0 {
+		t.Fatalf("empty: %v info=%+v", empty, infoE)
+	}
 }
 
 func TestIssues(t *testing.T) {
@@ -67,6 +75,20 @@ func TestIssues(t *testing.T) {
 	empty := filter.Issues(issues, "helper", "", "kubernetes-sigs/kubespray")
 	if len(empty) != 0 {
 		t.Fatalf("expected no matches, got %+v", empty)
+	}
+
+	viaBlob := filter.Issues(issues, "", "kubespray", "")
+	if len(viaBlob) != 1 || viaBlob[0].Title != "Fix Python script" {
+		t.Fatalf("lang blob fallback: %+v", viaBlob)
+	}
+
+	copied := filter.Issues(issues, "  ", "\t", "")
+	if len(copied) != 3 {
+		t.Fatalf("blank filters should copy all, got %+v", copied)
+	}
+	copied[0].Title = "mutated"
+	if issues[0].Title != "Add Go helper" {
+		t.Fatal("empty filter should not alias input")
 	}
 }
 
@@ -138,11 +160,33 @@ func TestSortIssues(t *testing.T) {
 	if byComments[0].Comments != 5 {
 		t.Fatalf("comments: got %d", byComments[0].Comments)
 	}
+
+	byRepo := append([]issue.Issue(nil), issues...)
+	filter.SortIssues(byRepo, "repo")
+	if byRepo[0].Repository != "kubernetes-sigs/a" {
+		t.Fatalf("repo: got %q", byRepo[0].Repository)
+	}
+
+	byTitle := append([]issue.Issue(nil), issues...)
+	filter.SortIssues(byTitle, "TITLE")
+	if byTitle[0].Title != "A" {
+		t.Fatalf("title: got %q", byTitle[0].Title)
+	}
+
+	tied := []issue.Issue{
+		{Title: "same", Repository: "r", Comments: 1, CreatedAt: t1, HTMLURL: "u-b"},
+		{Title: "same", Repository: "r", Comments: 1, CreatedAt: t1, HTMLURL: "u-a"},
+	}
+	filter.SortIssues(tied, "comments")
+	if tied[0].HTMLURL != "u-a" {
+		t.Fatalf("HTMLURL tie-break: got %q", tied[0].HTMLURL)
+	}
 }
 
 func TestUniqueRepos(t *testing.T) {
 	got := filter.UniqueRepos([]issue.Issue{
 		{Repository: "kubernetes-sigs/kind"},
+		{Repository: ""},
 		{Repository: "kubernetes-sigs/cluster-api"},
 		{Repository: "kubernetes-sigs/kind"},
 	})

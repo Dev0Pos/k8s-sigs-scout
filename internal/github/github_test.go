@@ -118,6 +118,164 @@ func TestClientSendsBearerToken(t *testing.T) {
 	}
 }
 
+func TestConfigureDefaultFromEnv(t *testing.T) {
+	prev := github.DefaultClient.Token
+	t.Cleanup(func() { github.DefaultClient.Token = prev })
+
+	t.Setenv("GITHUB_TOKEN", "  ghs_from_env  ")
+	if !github.ConfigureDefaultFromEnv() {
+		t.Fatal("expected auth enabled")
+	}
+	if github.DefaultClient.Token != "ghs_from_env" {
+		t.Fatalf("token = %q", github.DefaultClient.Token)
+	}
+
+	t.Setenv("GITHUB_TOKEN", " \t ")
+	if github.ConfigureDefaultFromEnv() {
+		t.Fatal("whitespace-only token should disable auth")
+	}
+	if github.DefaultClient.Token != "" {
+		t.Fatalf("token = %q, want empty", github.DefaultClient.Token)
+	}
+}
+
+func TestClientOmitsAuthorizationWithoutToken(t *testing.T) {
+	var gotAuth, gotUA, gotAccept, gotPerPage string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		gotUA = r.Header.Get("User-Agent")
+		gotAccept = r.Header.Get("Accept")
+		gotPerPage = r.URL.Query().Get("per_page")
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"total_count": 0, "items": []any{}})
+	}))
+	t.Cleanup(srv.Close)
+
+	client := &github.Client{HTTP: srv.Client(), BaseURL: srv.URL}
+	if _, err := client.FetchIssues(); err != nil {
+		t.Fatal(err)
+	}
+	if gotAuth != "" {
+		t.Fatalf("Authorization = %q, want empty", gotAuth)
+	}
+	if gotUA != "k8s-sigs-scout" {
+		t.Fatalf("User-Agent = %q", gotUA)
+	}
+	if gotAccept != "application/vnd.github+json" {
+		t.Fatalf("Accept = %q", gotAccept)
+	}
+	if gotPerPage != "100" {
+		t.Fatalf("per_page = %q, want 100", gotPerPage)
+	}
+}
+
+func TestClientFetchIssuesHTTPErrorNoRateLimit(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "nope", http.StatusInternalServerError)
+	}))
+	t.Cleanup(srv.Close)
+
+	client := &github.Client{HTTP: srv.Client(), BaseURL: srv.URL, PerPage: 1}
+	_, err := client.FetchIssues()
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "500") {
+		t.Fatalf("error %q, want status 500", err.Error())
+	}
+	if strings.Contains(err.Error(), "rate-limit-remaining") {
+		t.Fatalf("error %q should not include rate-limit when header absent", err.Error())
+	}
+}
+
+func TestClientErrorDoesNotLeakToken(t *testing.T) {
+	const token = "ghs_must_not_appear_in_errors"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("X-RateLimit-Remaining", "0")
+		http.Error(w, "nope", http.StatusForbidden)
+	}))
+	t.Cleanup(srv.Close)
+
+	client := &github.Client{HTTP: srv.Client(), BaseURL: srv.URL, Token: token, PerPage: 1}
+	_, err := client.FetchIssues()
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if strings.Contains(err.Error(), token) {
+		t.Fatalf("token leaked in error: %q", err.Error())
+	}
+}
+
+func TestClientFetchIssuesBadJSON(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte("{not-json"))
+	}))
+	t.Cleanup(srv.Close)
+
+	client := &github.Client{HTTP: srv.Client(), BaseURL: srv.URL, PerPage: 1}
+	if _, err := client.FetchIssues(); err == nil {
+		t.Fatal("expected JSON decode error")
+	}
+}
+
+func TestClientFetchIssuesDedupesHTMLURL(t *testing.T) {
+	dup := map[string]any{
+		"title":          "Dup",
+		"html_url":       "https://github.com/kubernetes-sigs/kind/issues/1",
+		"comments":       0,
+		"created_at":     time.Date(2025, 1, 2, 0, 0, 0, 0, time.UTC),
+		"labels":         []map[string]string{{"name": "good first issue"}},
+		"repository_url": "https://api.github.com/repos/kubernetes-sigs/kind",
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"total_count": 1,
+			"items":       []map[string]any{dup, dup},
+		})
+	}))
+	t.Cleanup(srv.Close)
+
+	client := &github.Client{HTTP: srv.Client(), BaseURL: srv.URL, PerPage: 2}
+	got, err := client.FetchIssues()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].Title != "Dup" {
+		t.Fatalf("got %+v, want one deduped issue", got)
+	}
+}
+
+func TestClientFetchIssuesTransportError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	client := &github.Client{HTTP: srv.Client(), BaseURL: srv.URL, PerPage: 1}
+	srv.Close()
+	if _, err := client.FetchIssues(); err == nil {
+		t.Fatal("expected transport error")
+	}
+}
+
+func TestFetchIssuesUsesDefaultClient(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"total_count": 0, "items": []any{}})
+	}))
+	t.Cleanup(srv.Close)
+
+	prev := github.DefaultClient
+	github.DefaultClient = &github.Client{HTTP: srv.Client(), BaseURL: srv.URL, PerPage: 1}
+	t.Cleanup(func() { github.DefaultClient = prev })
+
+	got, err := github.FetchIssues()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("got %+v", got)
+	}
+}
+
 func writePage(w http.ResponseWriter, total int, item map[string]any) {
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"total_count": total,
