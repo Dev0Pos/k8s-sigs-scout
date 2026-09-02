@@ -28,6 +28,19 @@ func TestGetSetCopy(t *testing.T) {
 	}
 }
 
+func TestSetCopiesInputSlice(t *testing.T) {
+	c := &cache.Cache{}
+	src := []issue.Issue{{Title: "one", Repository: "kubernetes-sigs/kind"}}
+
+	c.Set(src, nil)
+	src[0].Title = "mutated-after-set"
+
+	got, _, _ := c.Get()
+	if got[0].Title != "one" {
+		t.Fatalf("cache mutated via input slice: got title %q", got[0].Title)
+	}
+}
+
 func TestHealthDegraded(t *testing.T) {
 	c := &cache.Cache{}
 	c.Set([]issue.Issue{{Title: "one"}}, nil)
