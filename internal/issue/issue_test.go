@@ -16,6 +16,7 @@ func TestRepoFromURL(t *testing.T) {
 		{"standard api url", "https://api.github.com/repos/kubernetes-sigs/kind", "kubernetes-sigs/kind"},
 		{"fallback split", "https://example.com/foo/bar/kubernetes-sigs/cluster-api", "kubernetes-sigs/cluster-api"},
 		{"passthrough", "already/formatted", "already/formatted"},
+		{"no slash", "orphan", "orphan"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
