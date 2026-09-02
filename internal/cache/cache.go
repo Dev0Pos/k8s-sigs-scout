@@ -36,7 +36,9 @@ func (c *Cache) Set(issues []issue.Issue, err error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if err == nil {
-		c.issues = issues
+		// Keep cache ownership over its internal snapshot.
+		c.issues = make([]issue.Issue, len(issues))
+		copy(c.issues, issues)
 		c.updatedAt = time.Now().UTC()
 		c.err = nil
 		c.lastErr = ""
