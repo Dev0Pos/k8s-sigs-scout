@@ -70,6 +70,55 @@ func TestIssues(t *testing.T) {
 	}
 }
 
+func TestIssuesLangGoDoesNotMatchGoodFirstIssueLabel(t *testing.T) {
+	issues := []issue.Issue{
+		{
+			Title:         "Python fix",
+			Repository:    "kubernetes-sigs/kubespray",
+			Labels:        []string{"good first issue", "python"},
+			LanguageHints: []string{"python"},
+		},
+		{
+			Title:         "Go helper",
+			Repository:    "kubernetes-sigs/kind",
+			Labels:        []string{"good first issue"},
+			LanguageHints: []string{"go"},
+		},
+		{
+			Title:      "Untagged cluster-api task",
+			Repository: "kubernetes-sigs/cluster-api",
+			Labels:     []string{"good first issue"},
+		},
+	}
+
+	got := filter.Issues(issues, "", "go", "")
+	if len(got) != 1 || got[0].Title != "Go helper" {
+		t.Fatalf("lang=go should only match LanguageHints go, got %+v", got)
+	}
+}
+
+func TestIssuesLangJavaDoesNotMatchJavascript(t *testing.T) {
+	issues := []issue.Issue{
+		{
+			Title:         "JS",
+			Repository:    "kubernetes-sigs/js-app",
+			Labels:        []string{"good first issue", "javascript"},
+			LanguageHints: []string{"javascript"},
+		},
+		{
+			Title:         "Java",
+			Repository:    "kubernetes-sigs/java-app",
+			Labels:        []string{"good first issue", "java"},
+			LanguageHints: []string{"java"},
+		},
+	}
+
+	got := filter.Issues(issues, "", "java", "")
+	if len(got) != 1 || got[0].Title != "Java" {
+		t.Fatalf("lang=java should not match javascript, got %+v", got)
+	}
+}
+
 func TestSortIssues(t *testing.T) {
 	t1 := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
 	t2 := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)

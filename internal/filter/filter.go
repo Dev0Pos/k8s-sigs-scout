@@ -95,10 +95,7 @@ func Issues(issues []issue.Issue, q, lang, repo string) []issue.Issue {
 				}
 			}
 			if !matchLang {
-				blob := strings.ToLower(iss.Repository + " " + strings.Join(iss.Labels, " "))
-				if !strings.Contains(blob, lang) {
-					continue
-				}
+				continue
 			}
 		}
 		if q != "" {
