@@ -159,6 +159,71 @@ func TestHealthzErrorUnavailable(t *testing.T) {
 	}
 }
 
+func TestHealthzStartingStaysOK(t *testing.T) {
+	srv, err := server.New(&cache.Cache{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("starting healthz should stay 200 for probes, got %d", rec.Code)
+	}
+	var body cache.Health
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	if body.Status != "starting" {
+		t.Fatalf("body = %+v", body)
+	}
+}
+
+func TestIndexLangGoDoesNotMatchGoodFirstIssue(t *testing.T) {
+	store := fakeStore{issues: []issue.Issue{
+		{
+			Title:         "Python fix",
+			Repository:    "kubernetes-sigs/kubespray",
+			HTMLURL:       "https://example.com/py",
+			Labels:        []string{"good first issue", "python"},
+			LanguageHints: []string{"python"},
+		},
+		{
+			Title:         "Go helper",
+			Repository:    "kubernetes-sigs/kind",
+			HTMLURL:       "https://example.com/go",
+			Labels:        []string{"good first issue"},
+			LanguageHints: []string{"go"},
+		},
+		{
+			Title:      "Untagged cluster-api task",
+			Repository: "kubernetes-sigs/cluster-api",
+			HTMLURL:    "https://example.com/capi",
+			Labels:     []string{"good first issue"},
+		},
+	}}
+	srv, err := server.New(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/?lang=go", nil)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d", rec.Code)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, ">Go helper<") {
+		t.Fatalf("missing go issue: %s", body)
+	}
+	if strings.Contains(body, ">Python fix<") || strings.Contains(body, ">Untagged cluster-api task<") {
+		t.Fatalf("lang=go leaked non-go issues: %s", body)
+	}
+	if !strings.Contains(body, `value="go" selected`) {
+		t.Fatal("lang form should keep go selected")
+	}
+}
+
 func TestHealthzDegradedStaysOK(t *testing.T) {
 	srv, err := server.New(fakeStore{health: cache.Health{Status: "degraded", Issues: 3, Error: "timeout"}})
 	if err != nil {

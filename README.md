@@ -75,7 +75,7 @@ Query params (shareable deep-link; **Copy URL** copies `window.location.href`):
 | Param | Behavior |
 |-------|----------|
 | `q` | Case-insensitive substring of title + repository + labels |
-| `lang` | Language/tag hint (see below). If no hint matches, falls back to a substring of repository + labels |
+| `lang` | Exact match against `LanguageHints` only (no repository/label substring fallback) |
 | `repo` | Exact repository (`owner/name`) |
 | `sort` | `newest` (default, omitted from the URL), `comments`, `repo`, `title` |
 | `page` | UI page, **10** issues per page. Out-of-range values clamp. `page=1` is omitted from the URL |
