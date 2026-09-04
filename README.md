@@ -75,12 +75,14 @@ Query params (shareable deep-link; **Copy URL** copies `window.location.href`):
 | Param | Behavior |
 |-------|----------|
 | `q` | Case-insensitive substring of title + repository + labels |
-| `lang` | Language/tag hint (see below). If no hint matches, falls back to a substring of repository + labels |
+| `lang` | Exact match on derived **language hints** (below). Unknown values match nothing — no substring fallback on repo/labels |
 | `repo` | Exact repository (`owner/name`) |
-| `sort` | `newest` (default, omitted from the URL), `comments`, `repo`, `title` |
-| `page` | UI page, **10** issues per page. Out-of-range values clamp. `page=1` is omitted from the URL |
+| `sort` | `newest` (default, omitted from the URL), `comments`, `repo`, `title`. Any other value is treated as `newest` |
+| `page` | UI page, **10** issues per page. Out-of-range values clamp. Non-numeric `page` is treated as `1`. `page=1` is omitted from the URL |
 
-Language hints are derived from repository name + labels. Known tokens: `go` (`golang` normalizes to `go`), `python`, `javascript`, `typescript`, `rust`, `java`, `docs` (`documentation` normalizes to `docs`), `helm`, `yaml`.
+Language hints are tokenized from repository name + labels (split on `/`, `-`, `_`, `.`, `:`, and whitespace) and kept only if they match: `go` (`golang` → `go`), `python`, `javascript`, `typescript`, `rust`, `java`, `docs` (`documentation` → `docs`), `helm`, `yaml`. An issue whose tokens are only `good first issue` has **no** hints. `lang` compares those hints only — a label-text fallback would treat `good` as `go` and `javascript` as `java`.
+
+The filter form is HTMX (`hx-get="/"`, `hx-push-url`, 200ms debounce). The HTML loads Tailwind from `cdn.tailwindcss.com` and HTMX **2.0.4** from `unpkg.com`; deep-link query URLs still render on a full page load if those CDNs are blocked.
 
 Example: `/?q=helm&lang=go&repo=kubernetes-sigs%2Fkind&sort=comments&page=2`
 
@@ -110,7 +112,7 @@ Kubernetes probes in `deploy/k8s/scout.yaml` are **TCP on 8080**, not this endpo
 2. Fixed Search query: `org:kubernetes-sigs is:issue is:open label:"good first issue" no:assignee`
 3. Pagination: 100 items/page, **max 10 pages** (~1000 results — GitHub Search cap). Sorted `created` desc. HTTP client timeout 30s, `User-Agent: k8s-sigs-scout`.
 4. A failed refresh keeps the last good snapshot (`degraded`). A first-fetch failure with an empty cache is `error`.
-5. Filters and sort run in memory (`internal/filter`). Repo dropdown options are the distinct repositories in the **full** cache, not the current filter.
+5. Filters and sort run in memory (`internal/filter`). `lang` matches `LanguageHints` only. Repo dropdown options are the distinct repositories in the **full** cache, not the current filter. Sort ties break on `HTMLURL`.
 6. **New since last visit** uses `localStorage` key `k8s-scout:lastVisit`. The header count is **the current page only**. **Mark seen**, tab hide (`visibilitychange`), and page unload all write the timestamp. First visit shows `—`.
 
 ## Troubleshooting
@@ -120,6 +122,9 @@ Kubernetes probes in `deploy/k8s/scout.yaml` are **TCP on 8080**, not this endpo
 | `/healthz` `degraded` / amber banner | GitHub Search failed (often 403 + `rate-limit-remaining=0`) | Set `GITHUB_TOKEN`. Unauthenticated budget is ~60 req/h; a refresh can use up to 10 Search calls |
 | `/healthz` 503 `error` | First refresh failed; RAM is empty | Same as above. UI shows a hard error, not stale data |
 | Compose `PORT=3000` but the process still listens on 8080 | Compose maps host `PORT` → container `8080` | Open `http://localhost:3000`. To change the listen port, run the binary with `PORT=…` (not compose) |
+| `lang=go` looks empty, or an old build matches the whole catalog | Hints come from tokenized repo+labels only; a substring fallback on `"good first issue"` matches `go` | Use a dropdown token. Upgrade past the hint-only filter if every issue matches `lang=go` |
+| Unstyled page / changing filters does nothing | Browser cannot load Tailwind/HTMX CDNs | Allow `cdn.tailwindcss.com` and `unpkg.com`. Typed `/?q=…` URLs still work on full page load |
+| `docker exec` has no shell after a local rebuild | Current `Dockerfile` is `scratch` | Use process logs and `/healthz`. GHCR through `v0.10.0` is still Alpine |
 | "New since visit" is 0 after leaving the tab | Hide/unload writes `lastVisit` | Use **Mark seen** only when you intend to reset |
 | CI Go ≠ Docker builder | CI uses `go.mod`; image builder is `golang:1.27-alpine` | Expected until the module is bumped |
 
@@ -142,7 +147,7 @@ docker build -t k8s-scout .
 docker run --rm -p 8080:8080 k8s-scout
 ```
 
-Image runs as `nobody`, `CGO_ENABLED=0`, Alpine **3.24**, `PORT=8080`.
+Building from this tree produces `FROM scratch`: statically linked binary (`CGO_ENABLED=0`, `-trimpath -ldflags="-s -w"`), CA bundle copied from the `golang:1.27-alpine` builder, `USER 65532:65532`, `PORT=8080`. No shell — `docker exec` cannot open a prompt. GHCR tags through **v0.10.0** (including `:latest` until the next release) are still Alpine **3.24** / `USER nobody`. Dependabot only bumps the **builder** tag.
 
 Or from GHCR:
 

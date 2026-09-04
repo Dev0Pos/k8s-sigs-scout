@@ -27,7 +27,14 @@ kubectl apply -f namespace.yaml -f loki.yaml -f promtail.yaml -f grafana.yaml -f
 
 ### Image pin
 
-`scout.yaml` pins `ghcr.io/dev0pos/k8s-sigs-scout:v0.9.0` (`imagePullPolicy: IfNotPresent`). Newer git tags (for example `v0.10.0`) are **not** picked up until you bump that tag and roll the deployment:
+`scout.yaml` pins `ghcr.io/dev0pos/k8s-sigs-scout:v0.9.0` (`imagePullPolicy: IfNotPresent`). Newer git tags (for example `v0.10.0`) are **not** picked up until you bump that tag and roll the deployment.
+
+That pin lags two changes already on `main`:
+
+- **Language filter:** `v0.9.0` / `v0.10.0` still substring-match repo + labels, so `lang=go` matches the words in `good first issue`. Current `internal/filter` matches `LanguageHints` only (hub README).
+- **Runtime image:** those tags are Alpine **3.24** / `USER nobody`. Current `Dockerfile` is `scratch` (`USER 65532:65532`, no shell). After you bump to a scratch-based tag, use logs and `/healthz` instead of `kubectl exec`.
+
+The dashboard HTML loads Tailwind (`cdn.tailwindcss.com`) and HTMX 2.0.4 (`unpkg.com`). Browsers that cannot reach those CDNs get an unstyled page; filter changes need HTMX, but a full load of a `/?q=…&lang=…` URL still works.
 
 ```bash
 # after editing the image tag in scout.yaml
@@ -96,6 +103,9 @@ Useful app log lines (JSON `msg`): `listening`, `github api auth` (`enabled` boo
 | Loki PVC Pending | No `local-path` StorageClass | Install a local-path provisioner or change `storageClassName` in `loki.yaml` |
 | Promtail rollout timeout | DaemonSet not scheduled / hostPath | `install.sh` ignores this failure. `kubectl -n k8s-scout describe ds/promtail` |
 | No logs in Grafana | Promtail path mismatch or scrape lag | Confirm scout pods are `k8s-scout` in namespace `k8s-scout`; wait ~15s (`target_config.sync_period`) |
+| `lang=go` matches almost every issue | Pinned `v0.9.0` still uses the old label-substring filter | Expected on this pin. Bump the image to a release that includes the hint-only filter, or ignore `lang` until then |
+| `kubectl exec` has no shell after a scratch-based tag | Newer images are `FROM scratch` | `kubectl -n k8s-scout logs deploy/k8s-scout` and `/healthz`. Pinned `v0.9.0` is still Alpine |
+| Scout HTML has no CSS / changing filters does nothing | Browser blocked Tailwind/HTMX CDNs | Allow `cdn.tailwindcss.com` and `unpkg.com`, or open a shareable `/?lang=go` URL |
 
 ## Uninstall
 
