@@ -256,6 +256,105 @@ func TestClientFetchIssuesTransportError(t *testing.T) {
 	}
 }
 
+func TestClientFetchIssuesStopsAtMaxPages(t *testing.T) {
+	var pages int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		pages++
+		n := r.URL.Query().Get("page")
+		writePage(w, 999, map[string]any{
+			"title":          "P" + n,
+			"html_url":       "https://github.com/kubernetes-sigs/kind/issues/" + n,
+			"comments":       0,
+			"created_at":     time.Date(2025, 1, 2, 0, 0, 0, 0, time.UTC),
+			"labels":         []map[string]string{{"name": "good first issue"}},
+			"repository_url": "https://api.github.com/repos/kubernetes-sigs/kind",
+		})
+	}))
+	t.Cleanup(srv.Close)
+
+	client := &github.Client{HTTP: srv.Client(), BaseURL: srv.URL, PerPage: 1}
+	got, err := client.FetchIssues()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pages != 10 {
+		t.Fatalf("pages = %d, want 10 (Search API cap)", pages)
+	}
+	if len(got) != 10 {
+		t.Fatalf("len = %d, want 10", len(got))
+	}
+}
+
+func TestClientFetchIssuesNilHTTPUsesDefault(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"total_count": 0, "items": []any{}})
+	}))
+	t.Cleanup(srv.Close)
+
+	client := &github.Client{BaseURL: srv.URL, PerPage: 1}
+	got, err := client.FetchIssues()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("got %+v", got)
+	}
+}
+
+func TestClientFetchIssuesInvalidBaseURL(t *testing.T) {
+	client := &github.Client{HTTP: http.DefaultClient, BaseURL: "http://[", PerPage: 1}
+	if _, err := client.FetchIssues(); err == nil {
+		t.Fatal("expected URL parse error")
+	}
+}
+
+func TestClientFetchIssuesDedupesAcrossPages(t *testing.T) {
+	item := func(title, url string) map[string]any {
+		return map[string]any{
+			"title":          title,
+			"html_url":       url,
+			"comments":       0,
+			"created_at":     time.Date(2025, 1, 2, 0, 0, 0, 0, time.UTC),
+			"labels":         []map[string]string{{"name": "good first issue"}},
+			"repository_url": "https://api.github.com/repos/kubernetes-sigs/kind",
+		}
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Query().Get("page") {
+		case "1":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"total_count": 3,
+				"items": []map[string]any{
+					item("A", "https://github.com/kubernetes-sigs/kind/issues/1"),
+					item("B", "https://github.com/kubernetes-sigs/kind/issues/2"),
+				},
+			})
+		case "2":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"total_count": 3,
+				"items": []map[string]any{
+					item("B-dup", "https://github.com/kubernetes-sigs/kind/issues/2"),
+					item("C", "https://github.com/kubernetes-sigs/kind/issues/3"),
+				},
+			})
+		default:
+			t.Fatalf("unexpected page %q", r.URL.Query().Get("page"))
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	client := &github.Client{HTTP: srv.Client(), BaseURL: srv.URL, PerPage: 2}
+	got, err := client.FetchIssues()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 3 || got[0].Title != "A" || got[1].Title != "B" || got[2].Title != "C" {
+		t.Fatalf("got %+v, want A,B,C without cross-page dup", got)
+	}
+}
+
 func TestFetchIssuesUsesDefaultClient(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

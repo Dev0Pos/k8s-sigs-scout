@@ -84,6 +84,29 @@ func TestAccessLogSkipsHealthz(t *testing.T) {
 	}
 }
 
+func TestAccessLogImplicitOKStatus(t *testing.T) {
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(logging.New(&buf, logging.Options{Format: "json", Level: "info"}))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	h := logging.AccessLog(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("ok"))
+	}))
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d", rec.Code)
+	}
+	if !strings.Contains(buf.String(), `"status":200`) {
+		t.Fatalf("implicit WriteHeader should log 200: %s", buf.String())
+	}
+	if !strings.Contains(buf.String(), `"bytes":2`) {
+		t.Fatalf("expected written byte count: %s", buf.String())
+	}
+}
+
 func TestAccessLogOmitsAuthorizationHeader(t *testing.T) {
 	var buf bytes.Buffer
 	prev := slog.Default()
