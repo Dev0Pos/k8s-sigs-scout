@@ -78,8 +78,8 @@ func TestIssues(t *testing.T) {
 	}
 
 	viaBlob := filter.Issues(issues, "", "kubespray", "")
-	if len(viaBlob) != 1 || viaBlob[0].Title != "Fix Python script" {
-		t.Fatalf("lang blob fallback: %+v", viaBlob)
+	if len(viaBlob) != 0 {
+		t.Fatalf("lang should match hints only, got %+v", viaBlob)
 	}
 
 	copied := filter.Issues(issues, "  ", "\t", "")
