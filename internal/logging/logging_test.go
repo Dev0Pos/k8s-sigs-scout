@@ -43,6 +43,21 @@ func TestNewJSON(t *testing.T) {
 	}
 }
 
+func TestNewEmptyAndUnknownFormatJSON(t *testing.T) {
+	for _, format := range []string{"", " JSON ", "xml"} {
+		var buf bytes.Buffer
+		log := logging.New(&buf, logging.Options{Format: format, Level: "info"})
+		log.Info("hello")
+		var row map[string]any
+		if err := json.Unmarshal(buf.Bytes(), &row); err != nil {
+			t.Fatalf("format %q should be JSON: %v (%s)", format, err, buf.String())
+		}
+		if row["msg"] != "hello" {
+			t.Fatalf("format %q row = %#v", format, row)
+		}
+	}
+}
+
 func TestNewText(t *testing.T) {
 	var buf bytes.Buffer
 	log := logging.New(&buf, logging.Options{Format: "text", Level: "info"})

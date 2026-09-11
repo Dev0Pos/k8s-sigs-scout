@@ -81,6 +81,25 @@ func TestHealthStarting(t *testing.T) {
 	}
 }
 
+func TestHealthSnapshotUpdatedAtRFC3339(t *testing.T) {
+	c := &cache.Cache{}
+	c.Set([]issue.Issue{{Title: "one"}}, nil)
+	h := c.HealthSnapshot()
+	if h.Status != "ok" {
+		t.Fatalf("health = %+v", h)
+	}
+	parsed, err := time.Parse(time.RFC3339, h.UpdatedAt)
+	if err != nil {
+		t.Fatalf("updated_at %q is not RFC3339: %v", h.UpdatedAt, err)
+	}
+	if parsed.Location() != time.UTC {
+		t.Fatalf("updated_at location = %v, want UTC", parsed.Location())
+	}
+	if h.AgeSeconds < 0 {
+		t.Fatalf("age_seconds = %d", h.AgeSeconds)
+	}
+}
+
 func TestSetSuccessClearsError(t *testing.T) {
 	c := &cache.Cache{}
 	c.Set(nil, errors.New("boom"))
