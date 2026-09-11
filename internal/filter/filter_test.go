@@ -24,6 +24,8 @@ func TestPath(t *testing.T) {
 		{"", "", "", "comments", 1, "/?sort=comments"},
 		{"", "", "", "", 2, "/?page=2"},
 		{"x", "go", "kubernetes-sigs/kind", "repo", 3, "/?lang=go&page=3&q=x&repo=kubernetes-sigs%2Fkind&sort=repo"},
+		{"  helm  ", "  go  ", "  kubernetes-sigs/kind  ", " NEWEST ", 1, "/?lang=go&q=helm&repo=kubernetes-sigs%2Fkind"},
+		{"", "", "", "nope", 0, "/"},
 	}
 	for _, tt := range tests {
 		got := filter.Path(tt.q, tt.lang, tt.repo, tt.sortMode, tt.page)
@@ -95,6 +97,31 @@ func TestIssues(t *testing.T) {
 	copied[0].Title = "mutated"
 	if issues[0].Title != "Add Go helper" {
 		t.Fatal("empty filter should not alias input")
+	}
+
+	viaLangCase := filter.Issues(issues, "", "GO", "")
+	if len(viaLangCase) != 1 || viaLangCase[0].Title != "Add Go helper" {
+		t.Fatalf("lang must fold case, got %+v", viaLangCase)
+	}
+
+	viaTitleCase := filter.Issues(issues, "HELPER", "", "")
+	if len(viaTitleCase) != 1 || viaTitleCase[0].Title != "Add Go helper" {
+		t.Fatalf("q must match title case-insensitively, got %+v", viaTitleCase)
+	}
+
+	viaRepoBlob := filter.Issues(issues, "KIND", "", "")
+	if len(viaRepoBlob) != 1 || viaRepoBlob[0].Repository != "kubernetes-sigs/kind" {
+		t.Fatalf("q must match repository blob, got %+v", viaRepoBlob)
+	}
+
+	shortRepo := filter.Issues(issues, "", "", "kind")
+	if len(shortRepo) != 0 {
+		t.Fatalf("repo must be exact owner/name, got %+v", shortRepo)
+	}
+
+	wrongCaseRepo := filter.Issues(issues, "", "", "kubernetes-sigs/Kind")
+	if len(wrongCaseRepo) != 0 {
+		t.Fatalf("repo must be case-sensitive, got %+v", wrongCaseRepo)
 	}
 }
 
@@ -201,5 +228,27 @@ func TestUniqueRepos(t *testing.T) {
 	want := []string{"kubernetes-sigs/cluster-api", "kubernetes-sigs/kind"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("UniqueRepos = %v, want %v", got, want)
+	}
+}
+
+func TestNormalizeSort(t *testing.T) {
+	if filter.NormalizeSort(" COMMENTS ") != "comments" {
+		t.Fatal("comments")
+	}
+	if filter.NormalizeSort("nope") != filter.DefaultSort {
+		t.Fatal("unknown should fall back to newest")
+	}
+}
+
+func TestSortIssuesUnknownModeUsesNewest(t *testing.T) {
+	t1 := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+	t2 := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+	issues := []issue.Issue{
+		{Title: "old", CreatedAt: t1, HTMLURL: "u1"},
+		{Title: "new", CreatedAt: t2, HTMLURL: "u2"},
+	}
+	filter.SortIssues(issues, "not-a-sort")
+	if issues[0].Title != "new" {
+		t.Fatalf("unknown sort should use newest, got %q", issues[0].Title)
 	}
 }
