@@ -17,7 +17,7 @@ Dashboard for browsing unassigned **good first issue** tasks from the GitHub org
 | Variable | Default | Purpose |
 |----------|---------|---------|
 | `PORT` | `8080` | Listen address (`:` + value) in `cmd/k8s-scout` |
-| `GITHUB_TOKEN` | unset | Optional PAT or fine-grained token sent as `Authorization: Bearer`. Raises Search API limits (~60 req/h unauthenticated → ~5000/h). Used only by the cache refresher — never exposed to the browser or logs |
+| `GITHUB_TOKEN` | unset | Optional PAT or fine-grained token sent as `Authorization: Bearer`. Raises Search API limits (~60 req/h unauthenticated → ~5000/h). Trimmed; whitespace-only is treated as unset. Used only by the cache refresher — never exposed to the browser or logs |
 | `LOG_FORMAT` | `json` | `text` for slog text; any other value (including empty) is JSON |
 | `LOG_LEVEL` | `info` | `debug`, `info`, `warn` / `warning`, `error` |
 
@@ -75,12 +75,14 @@ Query params (shareable deep-link; **Copy URL** copies `window.location.href`):
 | Param | Behavior |
 |-------|----------|
 | `q` | Case-insensitive substring of title + repository + labels |
-| `lang` | Exact match against `LanguageHints` only (no repository/label substring fallback) |
+| `lang` | Exact match on derived **language hints** (below). Unknown values match nothing — no substring fallback on repo/labels |
 | `repo` | Exact repository (`owner/name`) |
-| `sort` | `newest` (default, omitted from the URL), `comments`, `repo`, `title` |
-| `page` | UI page, **10** issues per page. Out-of-range values clamp. `page=1` is omitted from the URL |
+| `sort` | `newest` (default, omitted from the URL), `comments`, `repo`, `title`. Any other value is treated as `newest` |
+| `page` | UI page, **10** issues per page. Out-of-range values clamp. Non-numeric `page` is treated as `1`. `page=1` is omitted from the URL |
 
-Language hints are derived from repository name + labels. Known tokens: `go` (`golang` normalizes to `go`), `python`, `javascript`, `typescript`, `rust`, `java`, `docs` (`documentation` normalizes to `docs`), `helm`, `yaml`.
+Language hints are tokenized from repository name + labels (split on `/`, `-`, `_`, `.`, `:`, and whitespace) and kept only if they match: `go` (`golang` → `go`), `python`, `javascript`, `typescript`, `rust`, `java`, `docs` (`documentation` → `docs`), `helm`, `yaml`. An issue whose tokens are only `good first issue` has **no** hints. `lang` compares those hints only — a label-text fallback would treat `good` as `go` and `javascript` as `java`.
+
+The filter form is HTMX (`hx-get="/"`, `hx-push-url`, 200ms debounce). The HTML loads Tailwind from `cdn.tailwindcss.com` and HTMX **2.0.4** from `unpkg.com`; typed `/?q=…` URLs still render on a full page load if those CDNs are blocked.
 
 Example: `/?q=helm&lang=go&repo=kubernetes-sigs%2Fkind&sort=comments&page=2`
 
@@ -102,15 +104,15 @@ Example: `/?q=helm&lang=go&repo=kubernetes-sigs%2Fkind&sort=comments&page=2`
 | `degraded` | 200 | Snapshot present, last refresh failed (`error` set; UI amber banner) |
 | `error` | 503 | No snapshot and last refresh failed (`error` set; UI red banner) |
 
-Kubernetes probes in `deploy/k8s/scout.yaml` are **TCP on 8080**, not this endpoint — a GitHub outage does not restart the pod.
+Kubernetes probes in `deploy/k8s/scout.yaml` are **TCP on 8080**, not this endpoint — after the process is listening, a GitHub outage does not restart the pod. The first Search still blocks listen (see Troubleshooting).
 
 ## How it works
 
-1. `cache.StartRefresher` fetches on process start, then every **15 minutes**. Browsers never call GitHub.
+1. `cache.StartRefresher` runs the first GitHub fetch **on the main goroutine**. `ListenAndServe` starts only after that call returns (success or failure). A ticker then refreshes every **15 minutes**. Browsers never call GitHub.
 2. Fixed Search query: `org:kubernetes-sigs is:issue is:open label:"good first issue" no:assignee`
-3. Pagination: 100 items/page, **max 10 pages** (~1000 results — GitHub Search cap). Sorted `created` desc. HTTP client timeout 30s, `User-Agent: k8s-sigs-scout`.
-4. A failed refresh keeps the last good snapshot (`degraded`). A first-fetch failure with an empty cache is `error`.
-5. Filters and sort run in memory (`internal/filter`). Repo dropdown options are the distinct repositories in the **full** cache, not the current filter.
+3. Pagination: 100 items/page, **max 10 pages** (~1000 results — GitHub Search cap). Sorted `created` desc. HTTP client timeout 30s, `Accept: application/vnd.github+json`, `User-Agent: k8s-sigs-scout`. Duplicate `html_url` values are dropped.
+4. A failed refresh keeps the last good snapshot (`degraded`). A first-fetch failure with an empty cache is `error`. `Get`/`Set` copy the slice so callers cannot alias the snapshot.
+5. Filters and sort run in memory (`internal/filter`). `lang` matches `LanguageHints` only. Repo dropdown options are the distinct repositories in the **full** cache, not the current filter. Equal sort keys break on `HTMLURL`.
 6. **New since last visit** uses `localStorage` key `k8s-scout:lastVisit`. The header count is **the current page only**. **Mark seen**, tab hide (`visibilitychange`), and page unload all write the timestamp. First visit shows `—`.
 
 ## Troubleshooting
@@ -119,7 +121,12 @@ Kubernetes probes in `deploy/k8s/scout.yaml` are **TCP on 8080**, not this endpo
 |---------|--------------|------------|
 | `/healthz` `degraded` / amber banner | GitHub Search failed (often 403 + `rate-limit-remaining=0`) | Set `GITHUB_TOKEN`. Unauthenticated budget is ~60 req/h; a refresh can use up to 10 Search calls |
 | `/healthz` 503 `error` | First refresh failed; RAM is empty | Same as above. UI shows a hard error, not stale data |
+| Process does not bind `PORT` for many seconds (or a pod restarts) | First Search runs **before** `ListenAndServe` (up to 10 × 30s) | Set `GITHUB_TOKEN`. Kubernetes TCP liveness (`initialDelaySeconds: 10`, period 20s) cannot succeed until listen starts |
 | Compose `PORT=3000` but the process still listens on 8080 | Compose maps host `PORT` → container `8080` | Open `http://localhost:3000`. To change the listen port, run the binary with `PORT=…` (not compose) |
+| `GITHUB_TOKEN` set but logs `github api auth enabled=false` | Value is whitespace-only after trim | Export a real PAT; empty / spaces disable auth |
+| `lang=go` looks empty, or an old build matches the whole catalog | Hints come from tokenized repo+labels only; a substring fallback on `"good first issue"` matches `go` | Use a dropdown token. Upgrade past the hint-only filter if every issue matches `lang=go` |
+| Unstyled page / changing filters does nothing | Browser cannot load Tailwind/HTMX CDNs | Allow `cdn.tailwindcss.com` and `unpkg.com`. Typed `/?q=…` URLs still work on full page load |
+| `docker exec` has no shell after a local rebuild | Current `Dockerfile` is `scratch` | Use process logs and `/healthz`. GHCR through `v0.10.0` is still Alpine |
 | "New since visit" is 0 after leaving the tab | Hide/unload writes `lastVisit` | Use **Mark seen** only when you intend to reset |
 | CI Go ≠ Docker builder | CI uses `go.mod`; image builder is `golang:1.27-alpine` | Expected until the module is bumped |
 
@@ -142,7 +149,7 @@ docker build -t k8s-scout .
 docker run --rm -p 8080:8080 k8s-scout
 ```
 
-Image runs as `nobody`, `CGO_ENABLED=0`, Alpine **3.24**, `PORT=8080`.
+Building from this tree produces `FROM scratch`: statically linked binary (`CGO_ENABLED=0`, `-trimpath -ldflags="-s -w"`), CA bundle copied from the `golang:1.27-alpine` builder, `USER 65532:65532`, `PORT=8080`. No shell — `docker exec` cannot open a prompt. GHCR tags through **v0.10.0** (including published `:latest` until the next release) are still Alpine **3.24** / `USER nobody`. Dependabot only bumps the **builder** tag.
 
 Or from GHCR:
 
@@ -156,7 +163,7 @@ docker run --rm -p 8080:8080 ghcr.io/dev0pos/k8s-sigs-scout:latest
 docker compose up --build
 ```
 
-Uses the local Dockerfile by default and tags the image as `ghcr.io/dev0pos/k8s-sigs-scout:latest`. To run a published image without building:
+`docker compose up --build` uses the local Dockerfile (scratch) and tags the image as `ghcr.io/dev0pos/k8s-sigs-scout:latest`. `docker compose pull` fetches the **published** `:latest` (today `v0.10.0`, Alpine + the old `lang` substring filter). To run that published image without building:
 
 ```bash
 docker compose pull
