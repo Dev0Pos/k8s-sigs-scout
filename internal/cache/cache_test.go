@@ -81,6 +81,25 @@ func TestHealthStarting(t *testing.T) {
 	}
 }
 
+func TestHealthSnapshotUpdatedAtRFC3339(t *testing.T) {
+	c := &cache.Cache{}
+	c.Set([]issue.Issue{{Title: "one"}}, nil)
+	h := c.HealthSnapshot()
+	if h.Status != "ok" {
+		t.Fatalf("health = %+v", h)
+	}
+	parsed, err := time.Parse(time.RFC3339, h.UpdatedAt)
+	if err != nil {
+		t.Fatalf("updated_at %q is not RFC3339: %v", h.UpdatedAt, err)
+	}
+	if parsed.Location() != time.UTC {
+		t.Fatalf("updated_at location = %v, want UTC", parsed.Location())
+	}
+	if h.AgeSeconds < 0 {
+		t.Fatalf("age_seconds = %d", h.AgeSeconds)
+	}
+}
+
 func TestSetSuccessClearsError(t *testing.T) {
 	c := &cache.Cache{}
 	c.Set(nil, errors.New("boom"))
@@ -93,6 +112,21 @@ func TestSetSuccessClearsError(t *testing.T) {
 	if h.Status != "ok" || h.Error != "" || h.Issues != 1 {
 		t.Fatalf("health = %+v", h)
 	}
+}
+
+func waitHealth(t *testing.T, c *cache.Cache, want string) cache.Health {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	var h cache.Health
+	for time.Now().Before(deadline) {
+		h = c.HealthSnapshot()
+		if h.Status == want {
+			return h
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("health status never became %s: %+v", want, h)
+	return h
 }
 
 func TestStartRefresherPopulatesCache(t *testing.T) {
@@ -122,6 +156,7 @@ func TestStartRefresherPopulatesCache(t *testing.T) {
 
 	c := &cache.Cache{}
 	cache.StartRefresher(c, 0) // 0 → DefaultInterval; ticker must not fire during this test
+	waitHealth(t, c, "ok")
 
 	got, updatedAt, err := c.Get()
 	if err != nil || updatedAt.IsZero() || len(got) != 1 || got[0].Title != "From refresher" {
@@ -145,6 +180,7 @@ func TestStartRefresherRecordsFailure(t *testing.T) {
 
 	c := &cache.Cache{}
 	cache.StartRefresher(c, time.Hour)
+	waitHealth(t, c, "error")
 
 	got, _, err := c.Get()
 	if err == nil || len(got) != 0 {
@@ -153,5 +189,58 @@ func TestStartRefresherRecordsFailure(t *testing.T) {
 	h := c.HealthSnapshot()
 	if h.Status != "error" || h.Error == "" {
 		t.Fatalf("health = %+v", h)
+	}
+}
+
+func TestStartRefresherDoesNotBlockOnFirstFetch(t *testing.T) {
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-release
+		if r.URL.Path != "/search/issues" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"total_count": 1,
+			"items": []map[string]any{{
+				"title":          "Late",
+				"html_url":       "https://github.com/kubernetes-sigs/kind/issues/10",
+				"comments":       0,
+				"created_at":     time.Date(2025, 1, 2, 0, 0, 0, 0, time.UTC),
+				"labels":         []map[string]string{{"name": "good first issue"}},
+				"repository_url": "https://api.github.com/repos/kubernetes-sigs/kind",
+			}},
+		})
+	}))
+	t.Cleanup(srv.Close)
+
+	prev := github.DefaultClient
+	github.DefaultClient = &github.Client{HTTP: srv.Client(), BaseURL: srv.URL, PerPage: 10}
+	t.Cleanup(func() { github.DefaultClient = prev })
+
+	c := &cache.Cache{}
+	returned := make(chan struct{})
+	go func() {
+		cache.StartRefresher(c, time.Hour)
+		close(returned)
+	}()
+
+	select {
+	case <-returned:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("StartRefresher blocked on the first GitHub fetch")
+	}
+
+	h := c.HealthSnapshot()
+	if h.Status != "starting" || h.Issues != 0 {
+		t.Fatalf("health while fetch in flight = %+v, want starting", h)
+	}
+
+	close(release)
+	waitHealth(t, c, "ok")
+	got, _, err := c.Get()
+	if err != nil || len(got) != 1 || got[0].Title != "Late" {
+		t.Fatalf("Get after release = %v %v", got, err)
 	}
 }
