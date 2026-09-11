@@ -85,7 +85,10 @@ func (c *Cache) HealthSnapshot() Health {
 	return h
 }
 
-// StartRefresher loads issues immediately and refreshes on interval.
+// StartRefresher starts a background loop that loads issues immediately and
+// then on interval. It returns without waiting for the first GitHub fetch so
+// the HTTP server can bind (and TCP probes can pass) while the cache is still
+// "starting". A Search outage or slow page must not delay ListenAndServe.
 func StartRefresher(c *Cache, interval time.Duration) {
 	if interval <= 0 {
 		interval = DefaultInterval
@@ -102,8 +105,8 @@ func StartRefresher(c *Cache, interval time.Duration) {
 		slog.Info("cache refreshed", "issues", len(issues), "duration_ms", time.Since(start).Milliseconds())
 	}
 
-	refresh()
 	go func() {
+		refresh()
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
 		for range ticker.C {

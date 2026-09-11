@@ -11,6 +11,76 @@ import (
 	"k8s-scout/internal/github"
 )
 
+func TestClientFetchIssuesSearchContract(t *testing.T) {
+	const wantQ = `org:kubernetes-sigs is:issue is:open label:"good first issue" no:assignee`
+	var gotQ, gotSort, gotOrder string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotQ = r.URL.Query().Get("q")
+		gotSort = r.URL.Query().Get("sort")
+		gotOrder = r.URL.Query().Get("order")
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"total_count": 0, "items": []any{}})
+	}))
+	t.Cleanup(srv.Close)
+
+	client := &github.Client{HTTP: srv.Client(), BaseURL: srv.URL, PerPage: 1}
+	if _, err := client.FetchIssues(); err != nil {
+		t.Fatal(err)
+	}
+	if gotQ != wantQ {
+		t.Fatalf("search q = %q, want %q", gotQ, wantQ)
+	}
+	if gotSort != "created" || gotOrder != "desc" {
+		t.Fatalf("sort=%q order=%q, want created/desc", gotSort, gotOrder)
+	}
+}
+
+func TestClientFetchIssuesStopsWhenTotalReachedOnFullPage(t *testing.T) {
+	var pages []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		page := r.URL.Query().Get("page")
+		pages = append(pages, page)
+		if page != "1" {
+			t.Fatalf("unexpected extra search page %q (rate-limit waste)", page)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"total_count": 2,
+			"items": []map[string]any{
+				{
+					"title":          "A",
+					"html_url":       "https://github.com/kubernetes-sigs/kind/issues/1",
+					"comments":       0,
+					"created_at":     time.Date(2025, 1, 2, 0, 0, 0, 0, time.UTC),
+					"labels":         []map[string]string{{"name": "good first issue"}},
+					"repository_url": "https://api.github.com/repos/kubernetes-sigs/kind",
+				},
+				{
+					"title":          "B",
+					"html_url":       "https://github.com/kubernetes-sigs/kind/issues/2",
+					"comments":       0,
+					"created_at":     time.Date(2025, 1, 2, 0, 0, 0, 0, time.UTC),
+					"labels":         []map[string]string{{"name": "good first issue"}},
+					"repository_url": "https://api.github.com/repos/kubernetes-sigs/kind",
+				},
+			},
+		})
+	}))
+	t.Cleanup(srv.Close)
+
+	client := &github.Client{HTTP: srv.Client(), BaseURL: srv.URL, PerPage: 2}
+	got, err := client.FetchIssues()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pages) != 1 || pages[0] != "1" {
+		t.Fatalf("pages = %v, want only page 1", pages)
+	}
+	if len(got) != 2 {
+		t.Fatalf("len = %d, want 2", len(got))
+	}
+}
+
 func TestClientFetchIssuesPaginated(t *testing.T) {
 	var pagesHit []string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -253,6 +323,105 @@ func TestClientFetchIssuesTransportError(t *testing.T) {
 	srv.Close()
 	if _, err := client.FetchIssues(); err == nil {
 		t.Fatal("expected transport error")
+	}
+}
+
+func TestClientFetchIssuesStopsAtMaxPages(t *testing.T) {
+	var pages int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		pages++
+		n := r.URL.Query().Get("page")
+		writePage(w, 999, map[string]any{
+			"title":          "P" + n,
+			"html_url":       "https://github.com/kubernetes-sigs/kind/issues/" + n,
+			"comments":       0,
+			"created_at":     time.Date(2025, 1, 2, 0, 0, 0, 0, time.UTC),
+			"labels":         []map[string]string{{"name": "good first issue"}},
+			"repository_url": "https://api.github.com/repos/kubernetes-sigs/kind",
+		})
+	}))
+	t.Cleanup(srv.Close)
+
+	client := &github.Client{HTTP: srv.Client(), BaseURL: srv.URL, PerPage: 1}
+	got, err := client.FetchIssues()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pages != 10 {
+		t.Fatalf("pages = %d, want 10 (Search API cap)", pages)
+	}
+	if len(got) != 10 {
+		t.Fatalf("len = %d, want 10", len(got))
+	}
+}
+
+func TestClientFetchIssuesNilHTTPUsesDefault(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"total_count": 0, "items": []any{}})
+	}))
+	t.Cleanup(srv.Close)
+
+	client := &github.Client{BaseURL: srv.URL, PerPage: 1}
+	got, err := client.FetchIssues()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("got %+v", got)
+	}
+}
+
+func TestClientFetchIssuesInvalidBaseURL(t *testing.T) {
+	client := &github.Client{HTTP: http.DefaultClient, BaseURL: "http://[", PerPage: 1}
+	if _, err := client.FetchIssues(); err == nil {
+		t.Fatal("expected URL parse error")
+	}
+}
+
+func TestClientFetchIssuesDedupesAcrossPages(t *testing.T) {
+	item := func(title, url string) map[string]any {
+		return map[string]any{
+			"title":          title,
+			"html_url":       url,
+			"comments":       0,
+			"created_at":     time.Date(2025, 1, 2, 0, 0, 0, 0, time.UTC),
+			"labels":         []map[string]string{{"name": "good first issue"}},
+			"repository_url": "https://api.github.com/repos/kubernetes-sigs/kind",
+		}
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Query().Get("page") {
+		case "1":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"total_count": 3,
+				"items": []map[string]any{
+					item("A", "https://github.com/kubernetes-sigs/kind/issues/1"),
+					item("B", "https://github.com/kubernetes-sigs/kind/issues/2"),
+				},
+			})
+		case "2":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"total_count": 3,
+				"items": []map[string]any{
+					item("B-dup", "https://github.com/kubernetes-sigs/kind/issues/2"),
+					item("C", "https://github.com/kubernetes-sigs/kind/issues/3"),
+				},
+			})
+		default:
+			t.Fatalf("unexpected page %q", r.URL.Query().Get("page"))
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	client := &github.Client{HTTP: srv.Client(), BaseURL: srv.URL, PerPage: 2}
+	got, err := client.FetchIssues()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 3 || got[0].Title != "A" || got[1].Title != "B" || got[2].Title != "C" {
+		t.Fatalf("got %+v, want A,B,C without cross-page dup", got)
 	}
 }
 

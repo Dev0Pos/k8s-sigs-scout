@@ -159,6 +159,71 @@ func TestHealthzErrorUnavailable(t *testing.T) {
 	}
 }
 
+func TestHealthzStartingStaysOK(t *testing.T) {
+	srv, err := server.New(&cache.Cache{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("starting healthz should stay 200 for probes, got %d", rec.Code)
+	}
+	var body cache.Health
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	if body.Status != "starting" {
+		t.Fatalf("body = %+v", body)
+	}
+}
+
+func TestIndexLangGoDoesNotMatchGoodFirstIssue(t *testing.T) {
+	store := fakeStore{issues: []issue.Issue{
+		{
+			Title:         "Python fix",
+			Repository:    "kubernetes-sigs/kubespray",
+			HTMLURL:       "https://example.com/py",
+			Labels:        []string{"good first issue", "python"},
+			LanguageHints: []string{"python"},
+		},
+		{
+			Title:         "Go helper",
+			Repository:    "kubernetes-sigs/kind",
+			HTMLURL:       "https://example.com/go",
+			Labels:        []string{"good first issue"},
+			LanguageHints: []string{"go"},
+		},
+		{
+			Title:      "Untagged cluster-api task",
+			Repository: "kubernetes-sigs/cluster-api",
+			HTMLURL:    "https://example.com/capi",
+			Labels:     []string{"good first issue"},
+		},
+	}}
+	srv, err := server.New(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/?lang=go", nil)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d", rec.Code)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, ">Go helper<") {
+		t.Fatalf("missing go issue: %s", body)
+	}
+	if strings.Contains(body, ">Python fix<") || strings.Contains(body, ">Untagged cluster-api task<") {
+		t.Fatalf("lang=go leaked non-go issues: %s", body)
+	}
+	if !strings.Contains(body, `value="go" selected`) {
+		t.Fatal("lang form should keep go selected")
+	}
+}
+
 func TestHealthzDegradedStaysOK(t *testing.T) {
 	srv, err := server.New(fakeStore{health: cache.Health{Status: "degraded", Issues: 3, Error: "timeout"}})
 	if err != nil {
@@ -336,6 +401,176 @@ func TestIndexCacheErrorEmpty(t *testing.T) {
 	srv.Handler().ServeHTTP(health, httptest.NewRequest(http.MethodGet, "/healthz", nil))
 	if health.Code != http.StatusServiceUnavailable {
 		t.Fatalf("healthz = %d, want 503", health.Code)
+	}
+}
+
+func TestIndexRepoDropdownUsesFullCache(t *testing.T) {
+	store := fakeStore{issues: []issue.Issue{
+		{
+			Title:         "Go helper",
+			Repository:    "kubernetes-sigs/kind",
+			HTMLURL:       "https://example.com/go",
+			LanguageHints: []string{"go"},
+		},
+		{
+			Title:         "Docs task",
+			Repository:    "kubernetes-sigs/cluster-api",
+			HTMLURL:       "https://example.com/docs",
+			LanguageHints: []string{"docs"},
+		},
+	}}
+	srv, err := server.New(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/?lang=go", nil)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	body := rec.Body.String()
+	if !strings.Contains(body, ">Go helper<") || strings.Contains(body, ">Docs task<") {
+		t.Fatalf("lang filter leaked or missed issues: %s", body)
+	}
+	if !strings.Contains(body, `value="kubernetes-sigs/cluster-api"`) {
+		t.Fatal("repo dropdown must list repos from the full cache, not the filtered set")
+	}
+	if !strings.Contains(body, "(filtered from 2)") {
+		t.Fatalf("missing filtered-from-total hint: %s", body)
+	}
+}
+
+func TestIndexUnknownSortDefaultsNewest(t *testing.T) {
+	store := fakeStore{issues: []issue.Issue{
+		{Title: "Old", Repository: "kubernetes-sigs/kind", HTMLURL: "https://example.com/1", CreatedAt: time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)},
+		{Title: "New", Repository: "kubernetes-sigs/kind", HTMLURL: "https://example.com/2", CreatedAt: time.Date(2025, 6, 1, 0, 0, 0, 0, time.UTC)},
+	}}
+	srv, err := server.New(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/?sort=not-a-sort", nil)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	body := rec.Body.String()
+	newer := strings.Index(body, ">New<")
+	older := strings.Index(body, ">Old<")
+	if newer < 0 || older < 0 || newer > older {
+		t.Fatalf("unknown sort should use newest: new=%d old=%d body=%s", newer, older, body)
+	}
+	if !strings.Contains(body, `selected>Newest`) {
+		t.Fatal("sort select should mark newest for unknown mode")
+	}
+}
+
+func TestIndexPageZeroAndOverflowClamp(t *testing.T) {
+	var issues []issue.Issue
+	for i := 0; i < 11; i++ {
+		issues = append(issues, issue.Issue{
+			Title:      fmt.Sprintf("Issue %02d", i),
+			Repository: "kubernetes-sigs/kind",
+			HTMLURL:    fmt.Sprintf("https://example.com/%d", i),
+			CreatedAt:  time.Date(2025, 1, i+1, 0, 0, 0, 0, time.UTC),
+		})
+	}
+	srv, err := server.New(fakeStore{issues: issues})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	page0 := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(page0, httptest.NewRequest(http.MethodGet, "/?page=0", nil))
+	if !strings.Contains(page0.Body.String(), "Page 1 / 2") {
+		t.Fatalf("page=0 should clamp to 1: %s", page0.Body.String())
+	}
+
+	overflow := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(overflow, httptest.NewRequest(http.MethodGet, "/?page=99", nil))
+	b := overflow.Body.String()
+	if !strings.Contains(b, "Page 2 / 2") {
+		t.Fatalf("page=99 should clamp to last page: %s", b)
+	}
+	if !strings.Contains(b, ">Issue 00<") {
+		t.Fatalf("clamped last page should include oldest issue: %s", b)
+	}
+}
+
+func TestIndexLangCaseFold(t *testing.T) {
+	store := fakeStore{issues: []issue.Issue{
+		{Title: "Go helper", Repository: "kubernetes-sigs/kind", HTMLURL: "https://example.com/go", LanguageHints: []string{"go"}},
+		{Title: "Python fix", Repository: "kubernetes-sigs/kubespray", HTMLURL: "https://example.com/py", LanguageHints: []string{"python"}},
+	}}
+	srv, err := server.New(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/?lang=GO", nil)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	body := rec.Body.String()
+	if !strings.Contains(body, ">Go helper<") || strings.Contains(body, ">Python fix<") {
+		t.Fatalf("lang=GO should fold to go: %s", body)
+	}
+}
+
+func TestResultsZeroCreatedOmitsTimestamp(t *testing.T) {
+	store := fakeStore{issues: []issue.Issue{
+		{Title: "No date", Repository: "kubernetes-sigs/kind", HTMLURL: "https://example.com/1"},
+	}}
+	srv, err := server.New(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("HX-Request", "true")
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	body := rec.Body.String()
+	if !strings.Contains(body, `data-created=""`) {
+		t.Fatalf("zero CreatedAt should omit timestamp: %s", body)
+	}
+	if strings.Contains(body, `data-created="0001-01-01`) {
+		t.Fatal("zero time must not be formatted as year 1")
+	}
+}
+
+func TestIndexEscapesHTMLInTitle(t *testing.T) {
+	store := fakeStore{issues: []issue.Issue{
+		{Title: `<script>alert("xss")</script>`, Repository: "kubernetes-sigs/kind", HTMLURL: "https://example.com/1"},
+	}}
+	srv, err := server.New(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	body := rec.Body.String()
+	if strings.Contains(body, `<script>alert("xss")</script>`) {
+		t.Fatal("raw script must not appear in HTML")
+	}
+	if !strings.Contains(body, "&lt;script&gt;") {
+		t.Fatalf("title should be HTML-escaped: %s", body)
+	}
+}
+
+func TestHealthzUpdatedAtRFC3339(t *testing.T) {
+	c := &cache.Cache{}
+	c.Set([]issue.Issue{{Title: "one", Repository: "kubernetes-sigs/kind"}}, nil)
+	srv, err := server.New(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d", rec.Code)
+	}
+	var body cache.Health
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := time.Parse(time.RFC3339, body.UpdatedAt); err != nil {
+		t.Fatalf("updated_at %q is not RFC3339: %v", body.UpdatedAt, err)
 	}
 }
 

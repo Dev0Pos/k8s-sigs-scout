@@ -43,6 +43,21 @@ func TestNewJSON(t *testing.T) {
 	}
 }
 
+func TestNewEmptyAndUnknownFormatJSON(t *testing.T) {
+	for _, format := range []string{"", " JSON ", "xml"} {
+		var buf bytes.Buffer
+		log := logging.New(&buf, logging.Options{Format: format, Level: "info"})
+		log.Info("hello")
+		var row map[string]any
+		if err := json.Unmarshal(buf.Bytes(), &row); err != nil {
+			t.Fatalf("format %q should be JSON: %v (%s)", format, err, buf.String())
+		}
+		if row["msg"] != "hello" {
+			t.Fatalf("format %q row = %#v", format, row)
+		}
+	}
+}
+
 func TestNewText(t *testing.T) {
 	var buf bytes.Buffer
 	log := logging.New(&buf, logging.Options{Format: "text", Level: "info"})
@@ -81,6 +96,29 @@ func TestAccessLogSkipsHealthz(t *testing.T) {
 	}
 	if strings.Contains(buf.String(), "Authorization") || strings.Contains(buf.String(), "token") {
 		t.Fatal("must not log auth material")
+	}
+}
+
+func TestAccessLogImplicitOKStatus(t *testing.T) {
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(logging.New(&buf, logging.Options{Format: "json", Level: "info"}))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	h := logging.AccessLog(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("ok"))
+	}))
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d", rec.Code)
+	}
+	if !strings.Contains(buf.String(), `"status":200`) {
+		t.Fatalf("implicit WriteHeader should log 200: %s", buf.String())
+	}
+	if !strings.Contains(buf.String(), `"bytes":2`) {
+		t.Fatalf("expected written byte count: %s", buf.String())
 	}
 }
 
