@@ -55,7 +55,7 @@ kubectl -n k8s-scout rollout restart deploy/k8s-scout
 
 ## Probes and resources
 
-Scout liveness/readiness are **TCP on container port 8080**, not `GET /healthz`. The process can stay Ready while GitHub is failing (`degraded` / `error` on `/healthz`). That is intentional: a Search outage must not restart the dashboard.
+Scout liveness/readiness are **TCP on container port 8080**, not `GET /healthz`. After listen starts, the process can stay Ready while GitHub is failing (`degraded` / `error` on `/healthz`). That is intentional: a later Search outage must not restart the dashboard. The first fetch is different — it runs before bind, so a hung Search can trip liveness (see Image pin).
 
 Requests/limits (from the manifests):
 
@@ -100,6 +100,7 @@ Useful app log lines (JSON `msg`): `listening`, `github api auth` (`enabled` boo
 |---------|--------------|------------|
 | Scout Ready but UI amber / `/healthz` `degraded` | GitHub Search 403 / rate limit | Create `k8s-scout-github` (see above). TCP probes will still pass |
 | Scout `/healthz` 503 | First refresh failed; empty cache | Same token fix. Check logs: `{namespace="k8s-scout", app="k8s-scout"} \|= "cache refresh failed"` |
+| Scout CrashLoop / `install.sh` rollout timeout | First Search blocked listen past liveness (~50s) | Create `k8s-scout-github` before apply. `kubectl -n k8s-scout logs deploy/k8s-scout` |
 | Loki PVC Pending | No `local-path` StorageClass | Install a local-path provisioner or change `storageClassName` in `loki.yaml` |
 | Promtail rollout timeout | DaemonSet not scheduled / hostPath | `install.sh` ignores this failure. `kubectl -n k8s-scout describe ds/promtail` |
 | No logs in Grafana | Promtail path mismatch or scrape lag | Confirm scout pods are `k8s-scout` in namespace `k8s-scout`; wait ~15s (`target_config.sync_period`) |
