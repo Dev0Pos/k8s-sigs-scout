@@ -106,7 +106,7 @@ Kubernetes probes in `deploy/k8s/scout.yaml` are **TCP on 8080**, not this endpo
 
 ## How it works
 
-1. `cache.StartRefresher` fetches on process start, then every **15 minutes**. Browsers never call GitHub.
+1. `cache.StartRefresher` starts a background fetch on process start, then every **15 minutes**. The HTTP server binds immediately (`/healthz` is `starting` until the first fetch finishes) so a slow or failing GitHub Search cannot delay listen or trip TCP liveness. Browsers never call GitHub.
 2. Fixed Search query: `org:kubernetes-sigs is:issue is:open label:"good first issue" no:assignee`
 3. Pagination: 100 items/page, **max 10 pages** (~1000 results — GitHub Search cap). Sorted `created` desc. HTTP client timeout 30s, `User-Agent: k8s-sigs-scout`.
 4. A failed refresh keeps the last good snapshot (`degraded`). A first-fetch failure with an empty cache is `error`.
