@@ -121,7 +121,7 @@ Kubernetes probes in `deploy/k8s/scout.yaml` are **TCP on 8080**, not this endpo
 |---------|--------------|------------|
 | `/healthz` `degraded` / amber banner | GitHub Search failed (often 403 + `rate-limit-remaining=0`) | Set `GITHUB_TOKEN`. Unauthenticated budget is ~60 req/h; a refresh can use up to 10 Search calls |
 | `/healthz` 503 `error` | First refresh failed; RAM is empty | Same as above. UI shows a hard error, not stale data |
-| Process does not bind `PORT` for many seconds (or a pod restarts) | First Search runs **before** `ListenAndServe` (up to 10 × 30s) | Set `GITHUB_TOKEN`. Kubernetes TCP liveness (`initialDelaySeconds: 10`, period 20s) cannot succeed until listen starts |
+| `/healthz` stays `starting` for a while after boot | First Search still running in background | Wait for first refresh, or set `GITHUB_TOKEN` to avoid unauthenticated throttling |
 | Compose `PORT=3000` but the process still listens on 8080 | Compose maps host `PORT` → container `8080` | Open `http://localhost:3000`. To change the listen port, run the binary with `PORT=…` (not compose) |
 | `GITHUB_TOKEN` set but logs `github api auth enabled=false` | Value is whitespace-only after trim | Export a real PAT; empty / spaces disable auth |
 | `lang=go` looks empty, or an old build matches the whole catalog | Hints come from tokenized repo+labels only; a substring fallback on `"good first issue"` matches `go` | Use a dropdown token. Upgrade past the hint-only filter if every issue matches `lang=go` |

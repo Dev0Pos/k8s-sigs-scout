@@ -36,8 +36,6 @@ That pin lags two changes already on `main`:
 
 The dashboard HTML loads Tailwind (`cdn.tailwindcss.com`) and HTMX 2.0.4 (`unpkg.com`). Browsers that cannot reach those CDNs get an unstyled page; filter changes need HTMX, but a full load of a `/?q=…&lang=…` URL still works.
 
-`cmd/k8s-scout` does not bind `:8080` until the first GitHub Search returns. TCP liveness (`initialDelaySeconds: 10`, period 20s, default `failureThreshold: 3`) restarts the container if that fetch takes longer than ~50s. Create `k8s-scout-github` before the first roll if the cluster IP is rate-limited.
-
 ```bash
 # after editing the image tag in scout.yaml
 kubectl -n k8s-scout apply -f scout.yaml
