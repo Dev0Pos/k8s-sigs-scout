@@ -91,10 +91,17 @@ func TestAccessLogSkipsHealthz(t *testing.T) {
 	buf.Reset()
 	rec = httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/?q=helm", nil))
-	if !strings.Contains(buf.String(), `"path":"/"`) {
-		t.Fatalf("access log = %s", buf.String())
+	out := buf.String()
+	if !strings.Contains(out, `"path":"/"`) {
+		t.Fatalf("access log = %s", out)
 	}
-	if strings.Contains(buf.String(), "Authorization") || strings.Contains(buf.String(), "token") {
+	if !strings.Contains(out, `"query":"q=helm"`) {
+		t.Fatalf("access log missing query: %s", out)
+	}
+	if !strings.Contains(out, `"method":"GET"`) {
+		t.Fatalf("access log missing method: %s", out)
+	}
+	if strings.Contains(out, "Authorization") || strings.Contains(out, "token") {
 		t.Fatal("must not log auth material")
 	}
 }

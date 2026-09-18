@@ -2,6 +2,7 @@ package github_test
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -203,6 +204,14 @@ func TestConfigureDefaultFromEnv(t *testing.T) {
 	t.Setenv("GITHUB_TOKEN", " \t ")
 	if github.ConfigureDefaultFromEnv() {
 		t.Fatal("whitespace-only token should disable auth")
+	}
+	if github.DefaultClient.Token != "" {
+		t.Fatalf("token = %q, want empty", github.DefaultClient.Token)
+	}
+
+	t.Setenv("GITHUB_TOKEN", "")
+	if github.ConfigureDefaultFromEnv() {
+		t.Fatal("empty token should disable auth")
 	}
 	if github.DefaultClient.Token != "" {
 		t.Fatalf("token = %q, want empty", github.DefaultClient.Token)
@@ -443,6 +452,84 @@ func TestFetchIssuesUsesDefaultClient(t *testing.T) {
 	if len(got) != 0 {
 		t.Fatalf("got %+v", got)
 	}
+}
+
+func TestClientFetchIssuesEmptyBaseURLUsesAPIGitHub(t *testing.T) {
+	var gotURL string
+	transport := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		gotURL = r.URL.String()
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Status:     "200 OK",
+			Body:       io.NopCloser(strings.NewReader(`{"total_count":0,"items":[]}`)),
+			Header:     make(http.Header),
+			Request:    r,
+			Proto:      "HTTP/1.1",
+			ProtoMajor: 1,
+			ProtoMinor: 1,
+		}, nil
+	})
+
+	client := &github.Client{
+		HTTP:    &http.Client{Transport: transport},
+		BaseURL: "",
+		PerPage: 1,
+	}
+	got, err := client.FetchIssues()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("got %+v", got)
+	}
+	if !strings.HasPrefix(gotURL, "https://api.github.com/search/issues?") {
+		t.Fatalf("empty BaseURL must use api.github.com, got %q", gotURL)
+	}
+}
+
+func TestDefaultClientTimeoutAndBaseURL(t *testing.T) {
+	if github.DefaultClient == nil || github.DefaultClient.HTTP == nil {
+		t.Fatal("DefaultClient HTTP client is nil")
+	}
+	if github.DefaultClient.HTTP.Timeout != 30*time.Second {
+		t.Fatalf("DefaultClient timeout = %v, want 30s", github.DefaultClient.HTTP.Timeout)
+	}
+	if github.DefaultClient.BaseURL != "https://api.github.com" {
+		t.Fatalf("DefaultClient BaseURL = %q", github.DefaultClient.BaseURL)
+	}
+}
+
+func TestClientFetchIssuesLaterPageErrorDropsPartial(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("page") == "1" {
+			writePage(w, 2, map[string]any{
+				"title":          "First",
+				"html_url":       "https://github.com/kubernetes-sigs/kind/issues/1",
+				"comments":       0,
+				"created_at":     time.Date(2025, 1, 2, 0, 0, 0, 0, time.UTC),
+				"labels":         []map[string]string{{"name": "good first issue"}},
+				"repository_url": "https://api.github.com/repos/kubernetes-sigs/kind",
+			})
+			return
+		}
+		http.Error(w, "nope", http.StatusForbidden)
+	}))
+	t.Cleanup(srv.Close)
+
+	client := &github.Client{HTTP: srv.Client(), BaseURL: srv.URL, PerPage: 1}
+	got, err := client.FetchIssues()
+	if err == nil {
+		t.Fatal("expected error from page 2")
+	}
+	if got != nil {
+		t.Fatalf("partial page-1 results = %+v, want nil so cache keeps the last good snapshot", got)
+	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) {
+	return f(r)
 }
 
 func writePage(w http.ResponseWriter, total int, item map[string]any) {
