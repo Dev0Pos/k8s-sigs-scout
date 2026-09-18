@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"k8s-scout/internal/cache"
+	"k8s-scout/internal/github"
 	"k8s-scout/internal/issue"
 	"k8s-scout/internal/server"
 )
@@ -571,6 +572,166 @@ func TestHealthzUpdatedAtRFC3339(t *testing.T) {
 	}
 	if _, err := time.Parse(time.RFC3339, body.UpdatedAt); err != nil {
 		t.Fatalf("updated_at %q is not RFC3339: %v", body.UpdatedAt, err)
+	}
+}
+
+func TestHealthzStartingWhileFirstFetchInFlight(t *testing.T) {
+	release := make(chan struct{})
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-release
+		if r.URL.Path != "/search/issues" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"total_count": 1,
+			"items": []map[string]any{{
+				"title":          "Late",
+				"html_url":       "https://github.com/kubernetes-sigs/kind/issues/10",
+				"comments":       0,
+				"created_at":     time.Date(2025, 1, 2, 0, 0, 0, 0, time.UTC),
+				"labels":         []map[string]string{{"name": "good first issue"}},
+				"repository_url": "https://api.github.com/repos/kubernetes-sigs/kind",
+			}},
+		})
+	}))
+	t.Cleanup(upstream.Close)
+
+	prev := github.DefaultClient
+	github.DefaultClient = &github.Client{HTTP: upstream.Client(), BaseURL: upstream.URL, PerPage: 10}
+	t.Cleanup(func() { github.DefaultClient = prev })
+
+	c := &cache.Cache{}
+	srv, err := server.New(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cache.StartRefresher(c, time.Hour)
+
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("in-flight first fetch must keep healthz 200, got %d", rec.Code)
+	}
+	var body cache.Health
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	if body.Status != "starting" || body.Issues != 0 {
+		t.Fatalf("healthz while fetch in flight = %+v, want starting", body)
+	}
+
+	close(release)
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if c.HealthSnapshot().Status == "ok" {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("cache never became ok: %+v", c.HealthSnapshot())
+}
+
+func TestIndexPaginationPreservesFilters(t *testing.T) {
+	var issues []issue.Issue
+	for i := 0; i < 11; i++ {
+		issues = append(issues, issue.Issue{
+			Title:         fmt.Sprintf("Kind helper %02d", i),
+			Repository:    "kubernetes-sigs/kind",
+			HTMLURL:       fmt.Sprintf("https://example.com/%d", i),
+			LanguageHints: []string{"go"},
+			Comments:      i,
+			CreatedAt:     time.Date(2025, 1, i+1, 0, 0, 0, 0, time.UTC),
+		})
+	}
+	issues = append(issues, issue.Issue{
+		Title:         "Python fix",
+		Repository:    "kubernetes-sigs/kubespray",
+		HTMLURL:       "https://example.com/py",
+		LanguageHints: []string{"python"},
+		CreatedAt:     time.Date(2025, 6, 1, 0, 0, 0, 0, time.UTC),
+	})
+	srv, err := server.New(fakeStore{issues: issues})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	page1 := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(page1, httptest.NewRequest(http.MethodGet, "/?q=kind&lang=go&repo=kubernetes-sigs/kind&sort=comments", nil))
+	b1 := page1.Body.String()
+	if strings.Contains(b1, ">Python fix<") {
+		t.Fatal("combined filters leaked a non-matching issue")
+	}
+	if !strings.Contains(b1, `hx-get="/?lang=go&amp;page=2&amp;q=kind&amp;repo=kubernetes-sigs%2Fkind&amp;sort=comments"`) {
+		t.Fatalf("next page must keep q/lang/repo/sort: %s", b1)
+	}
+
+	page2 := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(page2, httptest.NewRequest(http.MethodGet, "/?q=kind&lang=go&repo=kubernetes-sigs/kind&sort=comments&page=2", nil))
+	b2 := page2.Body.String()
+	if !strings.Contains(b2, `hx-get="/?lang=go&amp;q=kind&amp;repo=kubernetes-sigs%2Fkind&amp;sort=comments"`) {
+		t.Fatalf("prev page must keep filters and omit page=1: %s", b2)
+	}
+}
+
+func TestIndexNoMatchEmptyState(t *testing.T) {
+	store := fakeStore{issues: []issue.Issue{
+		{Title: "Kind docs", Repository: "kubernetes-sigs/kind", HTMLURL: "https://example.com/1"},
+	}}
+	srv, err := server.New(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/?q=definitely-not-a-match", nil))
+	body := rec.Body.String()
+	if !strings.Contains(body, "No matching issues.") {
+		t.Fatalf("missing empty-filter state: %s", body)
+	}
+	if strings.Contains(body, "Failed to load issues") {
+		t.Fatal("unmatched filters must not look like a GitHub load failure")
+	}
+	if strings.Contains(body, ">Kind docs<") {
+		t.Fatal("unmatched issue still rendered")
+	}
+}
+
+func TestIndexEscapesHTMLInLabelsAndErrors(t *testing.T) {
+	c := &cache.Cache{}
+	c.Set(nil, errors.New(`<script>alert("xss")</script>`))
+	srv, err := server.New(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+	body := rec.Body.String()
+	if strings.Contains(body, `<script>alert("xss")</script>`) {
+		t.Fatal("raw script in cache error must not appear in HTML")
+	}
+	if !strings.Contains(body, "&lt;script&gt;") {
+		t.Fatalf("cache error should be HTML-escaped: %s", body)
+	}
+
+	store := fakeStore{issues: []issue.Issue{{
+		Title:      "Safe",
+		Repository: "kubernetes-sigs/kind",
+		HTMLURL:    "https://example.com/1",
+		Labels:     []string{`<img src=x onerror=alert(1)>`},
+	}}}
+	srv, err = server.New(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+	body = rec.Body.String()
+	if strings.Contains(body, `<img src=x onerror=alert(1)>`) {
+		t.Fatal("raw label HTML must not appear")
+	}
+	if !strings.Contains(body, "&lt;img src=x onerror=alert(1)&gt;") {
+		t.Fatalf("label should be HTML-escaped: %s", body)
 	}
 }
 

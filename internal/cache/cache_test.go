@@ -244,3 +244,32 @@ func TestStartRefresherDoesNotBlockOnFirstFetch(t *testing.T) {
 		t.Fatalf("Get after release = %v %v", got, err)
 	}
 }
+
+func TestStartRefresherFailedRefreshKeepsSnapshot(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "nope", http.StatusForbidden)
+	}))
+	t.Cleanup(srv.Close)
+
+	prev := github.DefaultClient
+	github.DefaultClient = &github.Client{HTTP: srv.Client(), BaseURL: srv.URL, PerPage: 1}
+	t.Cleanup(func() { github.DefaultClient = prev })
+
+	c := &cache.Cache{}
+	c.Set([]issue.Issue{{
+		Title:      "Stale",
+		Repository: "kubernetes-sigs/kind",
+		HTMLURL:    "https://github.com/kubernetes-sigs/kind/issues/1",
+	}}, nil)
+
+	cache.StartRefresher(c, time.Hour)
+	h := waitHealth(t, c, "degraded")
+	if h.Issues != 1 || h.Error == "" {
+		t.Fatalf("health = %+v", h)
+	}
+
+	got, _, err := c.Get()
+	if err != nil || len(got) != 1 || got[0].Title != "Stale" {
+		t.Fatalf("failed refresh must keep last snapshot: %v %v", got, err)
+	}
+}

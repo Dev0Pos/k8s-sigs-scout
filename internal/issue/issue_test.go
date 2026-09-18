@@ -44,6 +44,7 @@ func TestLanguageHints(t *testing.T) {
 		{"docs and documentation dedup", "kubernetes-sigs/kind", []string{"docs", "kind/documentation"}, []string{"docs"}},
 		{"typescript and rust labels", "kubernetes-sigs/mixed", []string{"typescript", "rust"}, []string{"typescript", "rust"}},
 		{"case insensitive tokens", "kubernetes-sigs/Kubespray", []string{"Language/Python"}, []string{"python"}},
+		{"colon separator", "kubernetes-sigs/kind", []string{"language:go"}, []string{"go"}},
 		{"no hints", "kubernetes-sigs/something", []string{"good first issue"}, []string{}},
 	}
 	for _, tt := range tests {
