@@ -5,7 +5,7 @@ Self-contained stack in namespace `k8s-scout` (own Loki/Grafana; does not depend
 | Component | Purpose | Access |
 |-----------|---------|--------|
 | **k8s-scout** | dashboard (`LOG_FORMAT=json`, image tag **pinned** in `scout.yaml`) | NodePort **30808** |
-| **Loki** | log store (filesystem, 5Gi `local-path` PVC, samples older than 168h rejected) | ClusterIP `:3100` |
+| **Loki** | log store (`grafana/loki:3.4.2`, filesystem, 5Gi `local-path` PVC, samples older than 168h rejected) | ClusterIP `:3100` |
 | **Promtail** | ships **scout** pod logs → Loki (DaemonSet) | hostPath `/var/log/pods` |
 | **Grafana** | Explore + preloaded dashboard (`grafana/grafana:11.5.2`) | NodePort **30300** (`admin` / `scout`) |
 
@@ -29,9 +29,10 @@ kubectl apply -f namespace.yaml -f loki.yaml -f promtail.yaml -f grafana.yaml -f
 
 `scout.yaml` pins `ghcr.io/dev0pos/k8s-sigs-scout:v0.9.0` (`imagePullPolicy: IfNotPresent`). Newer git tags (for example `v0.10.0`) are **not** picked up until you bump that tag and roll the deployment.
 
-That pin lags two changes already on `main`:
+That pin lags three changes already on `main`:
 
-- **Language filter:** `v0.9.0` / `v0.10.0` still substring-match repo + labels, so `lang=go` matches the words in `good first issue`. Current `internal/filter` matches `LanguageHints` only (hub README).
+- **First fetch:** `v0.9.0` / `v0.10.0` run GitHub Search on the main goroutine **before** listen. Current `cache.StartRefresher` returns immediately; `/healthz` is `starting` until the background fetch finishes. A hung unauthenticated Search on the pin can trip TCP liveness (`initialDelaySeconds: 10`, period 20s).
+- **Language filter:** those tags still substring-match repo + labels, so `lang=go` matches the words in `good first issue`. Current `internal/filter` matches `LanguageHints` only (hub README).
 - **Runtime image:** those tags are Alpine **3.24** / `USER nobody`. Current `Dockerfile` is `scratch` (`USER 65532:65532`, no shell). After you bump to a scratch-based tag, use logs and `/healthz` instead of `kubectl exec`.
 
 The dashboard HTML loads Tailwind (`cdn.tailwindcss.com`) and HTMX 2.0.4 (`unpkg.com`). Browsers that cannot reach those CDNs get an unstyled page; filter changes need HTMX, but a full load of a `/?q=…&lang=…` URL still works.
@@ -55,7 +56,9 @@ kubectl -n k8s-scout rollout restart deploy/k8s-scout
 
 ## Probes and resources
 
-Scout liveness/readiness are **TCP on container port 8080**, not `GET /healthz`. After listen starts, the process can stay Ready while GitHub is failing (`degraded` / `error` on `/healthz`). That is intentional: a later Search outage must not restart the dashboard. The first fetch is different — it runs before bind, so a hung Search can trip liveness (see Image pin).
+Scout liveness/readiness are **TCP on container port 8080** (readiness delay 2s / period 5s; liveness delay 10s / period 20s), not `GET /healthz`. After listen starts, the process stays Ready while GitHub is failing (`degraded` / `error`) or still empty (`starting` is HTTP 200). That is intentional: a Search outage must not restart the dashboard.
+
+On **current `main`**, `StartRefresher` does not block bind, so TCP probes pass while `/healthz` is `starting` and the UI shows **No matching issues** (no loading banner). The **pinned `v0.9.0`** image still runs the first Search before listen — a hung Search can CrashLoop (see Image pin).
 
 Requests/limits (from the manifests):
 
@@ -99,8 +102,9 @@ Useful app log lines (JSON `msg`): `listening`, `github api auth` (`enabled` boo
 | Symptom | Likely cause | What to do |
 |---------|--------------|------------|
 | Scout Ready but UI amber / `/healthz` `degraded` | GitHub Search 403 / rate limit | Create `k8s-scout-github` (see above). TCP probes will still pass |
+| Scout Ready but UI empty / "No matching issues" | Current images bind before the first snapshot (`/healthz` `starting`) | Wait for log `cache refreshed`, then reload. Pinned `v0.9.0` should not show this — it only becomes Ready after the first fetch returns |
 | Scout `/healthz` 503 | First refresh failed; empty cache | Same token fix. Check logs: `{namespace="k8s-scout", app="k8s-scout"} \|= "cache refresh failed"` |
-| Scout CrashLoop / `install.sh` rollout timeout | First Search blocked listen past liveness (~50s) | Create `k8s-scout-github` before apply. `kubectl -n k8s-scout logs deploy/k8s-scout` |
+| Scout CrashLoop / `install.sh` rollout timeout | Pinned `v0.9.0` runs first Search **before** listen; unauthenticated Search can exceed liveness (~50s) | Create `k8s-scout-github` before apply, or bump the image to a tag with background first-refresh. `kubectl -n k8s-scout logs deploy/k8s-scout` |
 | Loki PVC Pending | No `local-path` StorageClass | Install a local-path provisioner or change `storageClassName` in `loki.yaml` |
 | Promtail rollout timeout | DaemonSet not scheduled / hostPath | `install.sh` ignores this failure. `kubectl -n k8s-scout describe ds/promtail` |
 | No logs in Grafana | Promtail path mismatch or scrape lag | Confirm scout pods are `k8s-scout` in namespace `k8s-scout`; wait ~15s (`target_config.sync_period`) |
