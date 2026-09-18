@@ -39,7 +39,7 @@ internal/
 ## Run locally
 
 ```bash
-go test ./...
+go test ./...          # httptest only — no live GitHub, no GITHUB_TOKEN
 go run ./cmd/k8s-scout
 ```
 
@@ -75,8 +75,8 @@ Query params (shareable deep-link; **Copy URL** copies `window.location.href`):
 | Param | Behavior |
 |-------|----------|
 | `q` | Case-insensitive substring of title + repository + labels |
-| `lang` | Exact match on derived **language hints** (below). Unknown values match nothing — no substring fallback on repo/labels |
-| `repo` | Exact repository (`owner/name`) |
+| `lang` | Case-insensitive exact match on derived **language hints** (below). Unknown values match nothing — no substring fallback on repo/labels |
+| `repo` | Exact, case-sensitive `owner/name` (not a substring — `kind` matches nothing) |
 | `sort` | `newest` (default, omitted from the URL), `comments`, `repo`, `title`. Any other value is treated as `newest` |
 | `page` | UI page, **10** issues per page. Out-of-range values clamp. Non-numeric `page` is treated as `1`. `page=1` is omitted from the URL |
 
@@ -97,6 +97,12 @@ Example: `/?q=helm&lang=go&repo=kubernetes-sigs%2Fkind&sort=comments&page=2`
 }
 ```
 
+`updated_at` (RFC3339 UTC), `age_seconds`, and `error` are omitted when empty. Before the first snapshot:
+
+```json
+{"status":"starting","issues":0}
+```
+
 | `status` | HTTP | Meaning |
 |----------|------|---------|
 | `starting` | 200 | No snapshot yet |
@@ -104,11 +110,11 @@ Example: `/?q=helm&lang=go&repo=kubernetes-sigs%2Fkind&sort=comments&page=2`
 | `degraded` | 200 | Snapshot present, last refresh failed (`error` set; UI amber banner) |
 | `error` | 503 | No snapshot and last refresh failed (`error` set; UI red banner) |
 
-Kubernetes probes in `deploy/k8s/scout.yaml` are **TCP on 8080**, not this endpoint — after the process is listening, a GitHub outage does not restart the pod. The first Search still blocks listen (see Troubleshooting).
+Kubernetes probes in `deploy/k8s/scout.yaml` are **TCP on 8080**, not this endpoint — after the process is listening, a GitHub outage does not restart the pod. `/healthz` `starting` is also **200**, so an HTTP probe would pass before data exists. GHCR through **v0.10.0** still runs the first Search **before** listen.
 
 ## How it works
 
-1. `cache.StartRefresher` starts a background fetch on process start, then every **15 minutes**. The HTTP server binds immediately (`/healthz` is `starting` until the first fetch finishes) so a slow or failing GitHub Search cannot delay listen or trip TCP liveness. Browsers never call GitHub.
+1. `cache.StartRefresher` starts a background fetch on process start, then every **15 minutes**. The HTTP server binds immediately (`/healthz` is `starting` until the first fetch finishes) so a slow or failing GitHub Search cannot delay listen or trip TCP liveness. Until that fetch lands, `GET /` looks like an empty catalog — **No matching issues**, no starting banner (amber is `degraded` only; red is first-fetch failure). Browsers never call GitHub.
 2. Fixed Search query: `org:kubernetes-sigs is:issue is:open label:"good first issue" no:assignee`
 3. Pagination: 100 items/page, **max 10 pages** (~1000 results — GitHub Search cap). Sorted `created` desc. HTTP client timeout 30s, `Accept: application/vnd.github+json`, `User-Agent: k8s-sigs-scout`. Duplicate `html_url` values are dropped.
 4. A failed refresh keeps the last good snapshot (`degraded`). A first-fetch failure with an empty cache is `error`. `Get`/`Set` copy the slice so callers cannot alias the snapshot.
@@ -121,7 +127,8 @@ Kubernetes probes in `deploy/k8s/scout.yaml` are **TCP on 8080**, not this endpo
 |---------|--------------|------------|
 | `/healthz` `degraded` / amber banner | GitHub Search failed (often 403 + `rate-limit-remaining=0`) | Set `GITHUB_TOKEN`. Unauthenticated budget is ~60 req/h; a refresh can use up to 10 Search calls |
 | `/healthz` 503 `error` | First refresh failed; RAM is empty | Same as above. UI shows a hard error, not stale data |
-| `/healthz` stays `starting` for a while after boot | First Search still running in background | Wait for first refresh, or set `GITHUB_TOKEN` to avoid unauthenticated throttling |
+| `/healthz` stays `starting` / UI shows 0 issues | First Search still running in the background; the dashboard has no loading banner | Wait for `cache refreshed` in logs, or set `GITHUB_TOKEN`. Reload `/` after `/healthz` is `ok` |
+| Pod CrashLoop on **published** GHCR (`v0.10.0` / `:latest`) | Those tags still run the first Search **before** listen (up to 10 × 30s) | Build from this tree, or create `GITHUB_TOKEN` before start. Fixed on `main` |
 | Compose `PORT=3000` but the process still listens on 8080 | Compose maps host `PORT` → container `8080` | Open `http://localhost:3000`. To change the listen port, run the binary with `PORT=…` (not compose) |
 | `GITHUB_TOKEN` set but logs `github api auth enabled=false` | Value is whitespace-only after trim | Export a real PAT; empty / spaces disable auth |
 | `lang=go` looks empty, or an old build matches the whole catalog | Hints come from tokenized repo+labels only; a substring fallback on `"good first issue"` matches `go` | Use a dropdown token. Upgrade past the hint-only filter if every issue matches `lang=go` |
@@ -149,7 +156,7 @@ docker build -t k8s-scout .
 docker run --rm -p 8080:8080 k8s-scout
 ```
 
-Building from this tree produces `FROM scratch`: statically linked binary (`CGO_ENABLED=0`, `-trimpath -ldflags="-s -w"`), CA bundle copied from the `golang:1.27-alpine` builder, `USER 65532:65532`, `PORT=8080`. No shell — `docker exec` cannot open a prompt. GHCR tags through **v0.10.0** (including published `:latest` until the next release) are still Alpine **3.24** / `USER nobody`. Dependabot only bumps the **builder** tag.
+Building from this tree produces `FROM scratch`: statically linked binary (`CGO_ENABLED=0`, `-trimpath -ldflags="-s -w"`), CA bundle copied from the `golang:1.27-alpine` builder, `USER 65532:65532`, `PORT=8080`. No shell — `docker exec` cannot open a prompt. GHCR tags through **v0.10.0** (including published `:latest` until the next release) are still Alpine **3.24** / `USER nobody`, still substring-match `lang`, and still block listen on the first Search. Dependabot only bumps the **builder** tag.
 
 Or from GHCR:
 
@@ -163,7 +170,7 @@ docker run --rm -p 8080:8080 ghcr.io/dev0pos/k8s-sigs-scout:latest
 docker compose up --build
 ```
 
-`docker compose up --build` uses the local Dockerfile (scratch) and tags the image as `ghcr.io/dev0pos/k8s-sigs-scout:latest`. `docker compose pull` fetches the **published** `:latest` (today `v0.10.0`, Alpine + the old `lang` substring filter). To run that published image without building:
+`docker compose up --build` uses the local Dockerfile (scratch) and tags the image as `ghcr.io/dev0pos/k8s-sigs-scout:latest`. `docker compose pull` fetches the **published** `:latest` (today `v0.10.0`: Alpine, old `lang` substring filter, first Search **before** listen). To run that published image without building:
 
 ```bash
 docker compose pull
