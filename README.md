@@ -60,6 +60,17 @@ LOG_FORMAT=text LOG_LEVEL=debug go run ./cmd/k8s-scout   # local debugging
 
 HTTP access logs include `method`, `path`, `query`, `status`, `bytes`, `duration_ms`, `remote` (not `/healthz`). Authorization headers and the token value are never logged.
 
+## Develop
+
+`go.mod` has no third-party `require`s — `go test` / `go run` do not need a `go.sum`.
+
+Match CI lint (`.golangci.yml`: errcheck, govet, ineffassign, staticcheck, unused, misspell, revive with `exported` disabled). CI installs **v2.1.6** with `install-mode: goinstall`:
+
+```bash
+go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.1.6
+golangci-lint run
+```
+
 ## HTTP
 
 | Path | Response |
@@ -82,9 +93,11 @@ Query params (shareable deep-link; **Copy URL** copies `window.location.href`):
 
 Language hints are tokenized from repository name + labels (split on `/`, `-`, `_`, `.`, `:`, and whitespace) and kept only if they match: `go` (`golang` → `go`), `python`, `javascript`, `typescript`, `rust`, `java`, `docs` (`documentation` → `docs`), `helm`, `yaml`. An issue whose tokens are only `good first issue` has **no** hints. `lang` compares those hints only — a label-text fallback would treat `good` as `go` and `javascript` as `java`.
 
-The filter form is HTMX (`hx-get="/"`, `hx-push-url`, 200ms debounce). The HTML loads Tailwind from `cdn.tailwindcss.com` and HTMX **2.0.4** from `unpkg.com`; typed `/?q=…` URLs still render on a full page load if those CDNs are blocked.
+The filter form is HTMX (`hx-get="/"`, `hx-push-url`, 200ms debounce). **Previous** / **Next** keep `q` / `lang` / `repo` / `sort` via `filter.Path`. Those links encode keys in `url.Values` order (`lang`, `page`, `q`, `repo`, `sort`). HTMX form submits and typed URLs may use field order. The server reads by name — order does not matter.
 
-Example: `/?q=helm&lang=go&repo=kubernetes-sigs%2Fkind&sort=comments&page=2`
+The HTML loads Tailwind from `cdn.tailwindcss.com` and HTMX **2.0.4** from `unpkg.com`; typed `/?q=…` URLs still render on a full page load if those CDNs are blocked.
+
+Example (field order; equivalent to `/?lang=go&page=2&q=helm&repo=kubernetes-sigs%2Fkind&sort=comments`): `/?q=helm&lang=go&repo=kubernetes-sigs%2Fkind&sort=comments&page=2`
 
 ### `GET /healthz`
 
@@ -116,7 +129,7 @@ Kubernetes probes in `deploy/k8s/scout.yaml` are **TCP on 8080**, not this endpo
 
 1. `cache.StartRefresher` starts a background fetch on process start, then every **15 minutes**. The HTTP server binds immediately (`/healthz` is `starting` until the first fetch finishes) so a slow or failing GitHub Search cannot delay listen or trip TCP liveness. Until that fetch lands, `GET /` looks like an empty catalog — **No matching issues**, no starting banner (amber is `degraded` only; red is first-fetch failure). Browsers never call GitHub.
 2. Fixed Search query: `org:kubernetes-sigs is:issue is:open label:"good first issue" no:assignee`
-3. Pagination: 100 items/page, **max 10 pages** (~1000 results — GitHub Search cap). Sorted `created` desc. HTTP client timeout 30s, `Accept: application/vnd.github+json`, `User-Agent: k8s-sigs-scout`. Duplicate `html_url` values are dropped.
+3. Pagination: 100 items/page, **max 10 pages** (~1000 results — GitHub Search cap). Stops early when a page is short or unique results reach GitHub's `total_count` (often fewer than 10 calls). Sorted `created` desc. HTTP client timeout 30s, `Accept: application/vnd.github+json`, `User-Agent: k8s-sigs-scout`. Duplicate `html_url` values are dropped, including across pages. A later-page error returns **nil** (in-progress pages discarded) so `cache.Set` can keep the last good snapshot instead of publishing a truncated catalog.
 4. A failed refresh keeps the last good snapshot (`degraded`). A first-fetch failure with an empty cache is `error`. `Get`/`Set` copy the slice so callers cannot alias the snapshot.
 5. Filters and sort run in memory (`internal/filter`). `lang` matches `LanguageHints` only. Repo dropdown options are the distinct repositories in the **full** cache, not the current filter. Equal sort keys break on `HTMLURL`.
 6. **New since last visit** uses `localStorage` key `k8s-scout:lastVisit`. The header count is **the current page only**. **Mark seen**, tab hide (`visibilitychange`), and page unload all write the timestamp. First visit shows `—`.
@@ -125,7 +138,7 @@ Kubernetes probes in `deploy/k8s/scout.yaml` are **TCP on 8080**, not this endpo
 
 | Symptom | Likely cause | What to do |
 |---------|--------------|------------|
-| `/healthz` `degraded` / amber banner | GitHub Search failed (often 403 + `rate-limit-remaining=0`) | Set `GITHUB_TOKEN`. Unauthenticated budget is ~60 req/h; a refresh can use up to 10 Search calls |
+| `/healthz` `degraded` / amber banner | GitHub Search failed (often 403 + `rate-limit-remaining=0`), including a later page after page 1 succeeded | Set `GITHUB_TOKEN`. Unauthenticated budget is ~60 req/h; a refresh can use up to 10 Search calls. Partial pages from that refresh are discarded; the previous snapshot stays |
 | `/healthz` 503 `error` | First refresh failed; RAM is empty | Same as above. UI shows a hard error, not stale data |
 | `/healthz` stays `starting` / UI shows 0 issues | First Search still running in the background; the dashboard has no loading banner | Wait for `cache refreshed` in logs, or set `GITHUB_TOKEN`. Reload `/` after `/healthz` is `ok` |
 | Pod CrashLoop on **published** GHCR (`v0.10.0` / `:latest`) | Those tags still run the first Search **before** listen (up to 10 × 30s) | Build from this tree, or create `GITHUB_TOKEN` before start. Fixed on `main` |
@@ -141,7 +154,7 @@ Kubernetes probes in `deploy/k8s/scout.yaml` are **TCP on 8080**, not this endpo
 
 On push/PR: tests, build, `golangci-lint` **v2.1.6** (`install-mode: goinstall`), Docker + Trivy.
 
-On `v*` tags: Trivy gate (**0 vulns**, same as CI) on an amd64 image **before** any GHCR push, then multi-arch (`linux/amd64`, `linux/arm64`) publish to `ghcr.io/dev0pos/k8s-sigs-scout`.
+On `v*` tags: Trivy gate (**0 vulns**, same as CI) on an amd64 image **before** any GHCR push, then multi-arch (`linux/amd64`, `linux/arm64`) publish to `ghcr.io/dev0pos/k8s-sigs-scout` (`:<tag>` and `:latest`). To publish: `git tag vX.Y.Z && git push origin vX.Y.Z`. Bump `deploy/k8s/scout.yaml` separately — that pin does not follow `:latest`.
 
 Dependabot opens weekly PRs (Mondays) for GitHub Actions and Docker base images.
 
@@ -178,6 +191,8 @@ docker compose up
 ```
 
 Host port override (container still listens on 8080): `PORT=3000 docker compose up --build`.
+
+`LOG_FORMAT` and `LOG_LEVEL` pass through (defaults `json` / `info`).
 
 Optional GitHub auth (recommended for shared hosts):
 
