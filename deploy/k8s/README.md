@@ -93,15 +93,15 @@ In Grafana → **Explore** → Loki query:
 {namespace="k8s-scout", app="k8s-scout"}
 ```
 
-Promtail scrapes `/var/log/pods/k8s-scout_k8s-scout-*/k8s-scout/*.log` only (not Grafana/Loki), parses slog JSON, and promotes `level` to a label. Dashboard folder **k8s-scout** → **k8s-scout logs** (`uid: k8s-scout-logs`).
+Promtail scrapes `/var/log/pods/k8s-scout_k8s-scout-*/k8s-scout/*.log` only (not Grafana/Loki), parses slog JSON, and promotes `level` to a label. Dashboard folder **k8s-scout** → **k8s-scout logs** (`uid: k8s-scout-logs`). Grafana opens that panel as the home dashboard (`GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH`).
 
-Useful app log lines (JSON `msg`): `listening`, `github api auth` (`enabled` bool only), `cache refreshed`, `cache refresh failed`, `http request`.
+Useful app log lines (JSON `msg`): `listening`, `github api auth` (`enabled` bool only), `cache refreshed`, `cache refresh failed`, `http request`. With `LOG_LEVEL=debug`, also `fetched github search page` (`page`, `items`, `cache_size`, `reported_total`).
 
 ## Troubleshooting
 
 | Symptom | Likely cause | What to do |
 |---------|--------------|------------|
-| Scout Ready but UI amber / `/healthz` `degraded` | GitHub Search 403 / rate limit | Create `k8s-scout-github` (see above). TCP probes will still pass |
+| Scout Ready but UI amber / `/healthz` `degraded` | GitHub Search 403 / rate limit (including a later page after page 1 succeeded) | Create `k8s-scout-github` (see above). That refresh's partial pages are discarded; the previous snapshot stays. TCP probes will still pass |
 | Scout Ready but UI empty / "No matching issues" | Current images bind before the first snapshot (`/healthz` `starting`) | Wait for log `cache refreshed`, then reload. Pinned `v0.9.0` should not show this — it only becomes Ready after the first fetch returns |
 | Scout `/healthz` 503 | First refresh failed; empty cache | Same token fix. Check logs: `{namespace="k8s-scout", app="k8s-scout"} \|= "cache refresh failed"` |
 | Scout CrashLoop / `install.sh` rollout timeout | Pinned `v0.9.0` runs first Search **before** listen; unauthenticated Search can exceed liveness (~50s) | Create `k8s-scout-github` before apply, or bump the image to a tag with background first-refresh. `kubectl -n k8s-scout logs deploy/k8s-scout` |
