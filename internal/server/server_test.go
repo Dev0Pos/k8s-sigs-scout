@@ -175,8 +175,11 @@ func TestHealthzStartingStaysOK(t *testing.T) {
 	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
 		t.Fatal(err)
 	}
-	if body.Status != "starting" {
-		t.Fatalf("body = %+v", body)
+	if body.Status != "starting" || body.Issues != 0 || body.UpdatedAt != "" || body.Error != "" || body.AgeSeconds != 0 {
+		t.Fatalf("starting healthz must be empty snapshot JSON, got %+v", body)
+	}
+	if ct := rec.Header().Get("Content-Type"); !strings.Contains(ct, "application/json") {
+		t.Fatalf("Content-Type = %q", ct)
 	}
 }
 
@@ -235,6 +238,13 @@ func TestHealthzDegradedStaysOK(t *testing.T) {
 	srv.Handler().ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("degraded healthz should stay 200 for probes, got %d", rec.Code)
+	}
+	var body cache.Health
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	if body.Status != "degraded" || body.Issues != 3 || body.Error != "timeout" {
+		t.Fatalf("degraded healthz body = %+v", body)
 	}
 }
 
@@ -618,14 +628,39 @@ func TestHealthzStartingWhileFirstFetchInFlight(t *testing.T) {
 	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
 		t.Fatal(err)
 	}
-	if body.Status != "starting" || body.Issues != 0 {
-		t.Fatalf("healthz while fetch in flight = %+v, want starting", body)
+	if body.Status != "starting" || body.Issues != 0 || body.UpdatedAt != "" || body.Error != "" {
+		t.Fatalf("healthz while fetch in flight = %+v, want starting without snapshot fields", body)
+	}
+
+	dash := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(dash, httptest.NewRequest(http.MethodGet, "/", nil))
+	if dash.Code != http.StatusOK {
+		t.Fatalf("in-flight first fetch must keep GET / 200, got %d", dash.Code)
+	}
+	inFlightBody := dash.Body.String()
+	if !strings.Contains(inFlightBody, "No matching issues.") {
+		t.Fatalf("dashboard while starting must look like an empty catalog: %s", inFlightBody)
+	}
+	if strings.Contains(inFlightBody, "Failed to load issues") || strings.Contains(inFlightBody, "Showing cached data") || strings.Contains(inFlightBody, "Last refresh:") {
+		t.Fatalf("starting dashboard must not show load/degraded banners: %s", inFlightBody)
+	}
+	if strings.Contains(inFlightBody, ">Late<") {
+		t.Fatal("in-flight fetch leaked into the dashboard before completing")
 	}
 
 	close(release)
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
 		if c.HealthSnapshot().Status == "ok" {
+			ready := httptest.NewRecorder()
+			srv.Handler().ServeHTTP(ready, httptest.NewRequest(http.MethodGet, "/", nil))
+			readyBody := ready.Body.String()
+			if !strings.Contains(readyBody, ">Late<") {
+				t.Fatalf("dashboard after first fetch should show the issue: %s", readyBody)
+			}
+			if strings.Contains(readyBody, "Failed to load issues") || strings.Contains(readyBody, "No matching issues.") {
+				t.Fatalf("ready dashboard should not stay empty/error: %s", readyBody)
+			}
 			return
 		}
 		time.Sleep(10 * time.Millisecond)
@@ -732,6 +767,59 @@ func TestIndexEscapesHTMLInLabelsAndErrors(t *testing.T) {
 	}
 	if !strings.Contains(body, "&lt;img src=x onerror=alert(1)&gt;") {
 		t.Fatalf("label should be HTML-escaped: %s", body)
+	}
+}
+
+func TestIndexStartingLooksLikeEmptyCatalog(t *testing.T) {
+	srv, err := server.New(&cache.Cache{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("starting GET / should stay 200, got %d", rec.Code)
+	}
+	if ct := rec.Header().Get("Content-Type"); !strings.Contains(ct, "text/html") {
+		t.Fatalf("Content-Type = %q", ct)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "No matching issues.") {
+		t.Fatalf("starting cache should look like an empty catalog: %s", body)
+	}
+	if strings.Contains(body, "Failed to load issues") {
+		t.Fatal("starting must not look like a first-fetch failure")
+	}
+	if strings.Contains(body, "Showing cached data") {
+		t.Fatal("starting must not show the degraded banner")
+	}
+	if strings.Contains(body, "Last refresh:") {
+		t.Fatal("starting has no snapshot and must omit Last refresh")
+	}
+}
+
+func TestIndexEscapesQueryAndRepoInForm(t *testing.T) {
+	srv, err := server.New(fakeStore{issues: []issue.Issue{
+		{Title: "Safe", Repository: `kind"><img src=x>`, HTMLURL: "https://example.com/1"},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodGet, `/?q="><script>alert(1)</script>`, nil)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	body := rec.Body.String()
+	if strings.Contains(body, `<script>alert(1)</script>`) || strings.Contains(body, `"><script>`) {
+		t.Fatal("raw query must not break out of the search input")
+	}
+	if !strings.Contains(body, "alert(1)") {
+		t.Fatalf("escaped query should still be preserved in the form: %s", body)
+	}
+	if strings.Contains(body, `kind"><img src=x>`) {
+		t.Fatal("raw repo must not break out of the dropdown")
+	}
+	if !strings.Contains(body, "img src=x") {
+		t.Fatalf("escaped repo should still appear in the dropdown: %s", body)
 	}
 }
 

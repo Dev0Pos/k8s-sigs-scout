@@ -26,6 +26,8 @@ func TestPath(t *testing.T) {
 		{"x", "go", "kubernetes-sigs/kind", "repo", 3, "/?lang=go&page=3&q=x&repo=kubernetes-sigs%2Fkind&sort=repo"},
 		{"  helm  ", "  go  ", "  kubernetes-sigs/kind  ", " NEWEST ", 1, "/?lang=go&q=helm&repo=kubernetes-sigs%2Fkind"},
 		{"", "", "", "nope", 0, "/"},
+		{"a&b=c", "", "", "", 1, "/?q=a%26b%3Dc"},
+		{"hello world", "", "", "", 1, "/?q=hello+world"},
 	}
 	for _, tt := range tests {
 		got := filter.Path(tt.q, tt.lang, tt.repo, tt.sortMode, tt.page)
@@ -59,6 +61,10 @@ func TestPaginate(t *testing.T) {
 	empty, infoE := filter.Paginate(nil, 3)
 	if empty != nil || infoE.Page != 1 || infoE.Pages != 1 || infoE.From != 0 || infoE.To != 0 || infoE.Matched != 0 {
 		t.Fatalf("empty: %v info=%+v", empty, infoE)
+	}
+	page1[0].Title = "mutated"
+	if issues[0].Title == "mutated" {
+		t.Fatal("Paginate should return a copy")
 	}
 }
 

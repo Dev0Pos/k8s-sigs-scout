@@ -101,6 +101,12 @@ func TestAccessLogSkipsHealthz(t *testing.T) {
 	if !strings.Contains(out, `"method":"GET"`) {
 		t.Fatalf("access log missing method: %s", out)
 	}
+	if !strings.Contains(out, `"duration_ms"`) {
+		t.Fatalf("access log missing duration_ms: %s", out)
+	}
+	if !strings.Contains(out, `"remote"`) {
+		t.Fatalf("access log missing remote: %s", out)
+	}
 	if strings.Contains(out, "Authorization") || strings.Contains(out, "token") {
 		t.Fatal("must not log auth material")
 	}

@@ -3,8 +3,10 @@ package cache_test
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
@@ -12,6 +14,54 @@ import (
 	"k8s-scout/internal/github"
 	"k8s-scout/internal/issue"
 )
+
+func TestDefaultInterval(t *testing.T) {
+	if cache.DefaultInterval != 15*time.Minute {
+		t.Fatalf("DefaultInterval = %v, want 15m (unauthenticated Search budget)", cache.DefaultInterval)
+	}
+}
+
+func TestCacheConcurrentGetSetHealth(t *testing.T) {
+	c := &cache.Cache{}
+	var wg sync.WaitGroup
+	for i := 0; i < 16; i++ {
+		wg.Add(3)
+		go func(n int) {
+			defer wg.Done()
+			c.Set([]issue.Issue{{
+				Title:      fmt.Sprintf("issue-%d", n),
+				Repository: "kubernetes-sigs/kind",
+				HTMLURL:    fmt.Sprintf("https://example.com/%d", n),
+			}}, nil)
+		}(i)
+		go func() {
+			defer wg.Done()
+			got, _, err := c.Get()
+			if err != nil {
+				t.Errorf("Get during concurrent Set: %v", err)
+			}
+			_ = len(got)
+		}()
+		go func() {
+			defer wg.Done()
+			h := c.HealthSnapshot()
+			if h.Issues < 0 {
+				t.Errorf("health issues = %d", h.Issues)
+			}
+		}()
+	}
+	wg.Wait()
+
+	got, updatedAt, err := c.Get()
+	if err != nil || updatedAt.IsZero() || len(got) != 1 {
+		t.Fatalf("after concurrent writes Get = %v %v %v", got, updatedAt, err)
+	}
+	c.Set(nil, errors.New("boom"))
+	h := c.HealthSnapshot()
+	if h.Status != "degraded" || h.Issues != 1 || h.Error != "boom" {
+		t.Fatalf("failed refresh after concurrent writes = %+v", h)
+	}
+}
 
 func TestGetSetCopy(t *testing.T) {
 	c := &cache.Cache{}
