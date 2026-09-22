@@ -49,8 +49,9 @@ func ConfigureDefaultFromEnv() bool {
 }
 
 type searchResponse struct {
-	TotalCount int `json:"total_count"`
-	Items      []struct {
+	TotalCount        int  `json:"total_count"`
+	IncompleteResults bool `json:"incomplete_results"`
+	Items             []struct {
 		Title     string    `json:"title"`
 		HTMLURL   string    `json:"html_url"`
 		Comments  int       `json:"comments"`
@@ -127,6 +128,13 @@ func (c *Client) FetchIssues() ([]issue.Issue, error) {
 		_ = resp.Body.Close()
 		if err != nil {
 			return nil, err
+		}
+
+		// GitHub Search times out by returning HTTP 200 with a partial page and
+		// incomplete_results=true. Treat that as a failed refresh so the cache
+		// keeps the last complete snapshot instead of silently shrinking.
+		if payload.IncompleteResults {
+			return nil, fmt.Errorf("GitHub Search API returned incomplete results (page %d)", page)
 		}
 
 		if len(payload.Items) == 0 {

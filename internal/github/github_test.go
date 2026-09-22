@@ -499,6 +499,79 @@ func TestDefaultClientTimeoutAndBaseURL(t *testing.T) {
 	}
 }
 
+func TestClientFetchIssuesIncompleteResults(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"total_count":        40,
+			"incomplete_results": true,
+			"items": []map[string]any{{
+				"title":          "Partial",
+				"html_url":       "https://github.com/kubernetes-sigs/kind/issues/1",
+				"comments":       0,
+				"created_at":     time.Date(2025, 1, 2, 0, 0, 0, 0, time.UTC),
+				"labels":         []map[string]string{{"name": "good first issue"}},
+				"repository_url": "https://api.github.com/repos/kubernetes-sigs/kind",
+			}},
+		})
+	}))
+	t.Cleanup(srv.Close)
+
+	client := &github.Client{HTTP: srv.Client(), BaseURL: srv.URL, PerPage: 100}
+	got, err := client.FetchIssues()
+	if err == nil {
+		t.Fatal("expected incomplete_results to fail the fetch")
+	}
+	if !strings.Contains(err.Error(), "incomplete results") {
+		t.Fatalf("error %q, want incomplete results", err.Error())
+	}
+	if got != nil {
+		t.Fatalf("partial timeout results = %+v, want nil so cache keeps the last good snapshot", got)
+	}
+}
+
+func TestClientFetchIssuesLaterPageIncompleteDropsPartial(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Query().Get("page") == "1" {
+			writePage(w, 2, map[string]any{
+				"title":          "First",
+				"html_url":       "https://github.com/kubernetes-sigs/kind/issues/1",
+				"comments":       0,
+				"created_at":     time.Date(2025, 1, 2, 0, 0, 0, 0, time.UTC),
+				"labels":         []map[string]string{{"name": "good first issue"}},
+				"repository_url": "https://api.github.com/repos/kubernetes-sigs/kind",
+			})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"total_count":        2,
+			"incomplete_results": true,
+			"items": []map[string]any{{
+				"title":          "Timeout",
+				"html_url":       "https://github.com/kubernetes-sigs/kind/issues/2",
+				"comments":       0,
+				"created_at":     time.Date(2025, 1, 2, 0, 0, 0, 0, time.UTC),
+				"labels":         []map[string]string{{"name": "good first issue"}},
+				"repository_url": "https://api.github.com/repos/kubernetes-sigs/kind",
+			}},
+		})
+	}))
+	t.Cleanup(srv.Close)
+
+	client := &github.Client{HTTP: srv.Client(), BaseURL: srv.URL, PerPage: 1}
+	got, err := client.FetchIssues()
+	if err == nil {
+		t.Fatal("expected incomplete_results on page 2 to fail the fetch")
+	}
+	if !strings.Contains(err.Error(), "page 2") {
+		t.Fatalf("error %q, want page 2", err.Error())
+	}
+	if got != nil {
+		t.Fatalf("partial page-1 results = %+v, want nil so cache keeps the last good snapshot", got)
+	}
+}
+
 func TestClientFetchIssuesLaterPageErrorDropsPartial(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Query().Get("page") == "1" {
