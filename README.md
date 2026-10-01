@@ -110,7 +110,7 @@ Example (field order; equivalent to `/?lang=go&page=2&q=helm&repo=kubernetes-sig
 }
 ```
 
-`updated_at` (RFC3339 UTC), `age_seconds`, and `error` are omitted when empty. Before the first snapshot:
+`updated_at` (RFC3339 UTC), `age_seconds`, and `error` are omitted when empty. The dashboard **Last refresh** is the same `updatedAt` as **RFC822**. Both stay at the last **successful** snapshot during `degraded`. Before the first snapshot:
 
 ```json
 {"status":"starting","issues":0}
@@ -129,7 +129,7 @@ Kubernetes probes in `deploy/k8s/scout.yaml` are **TCP on 8080**, not this endpo
 
 1. `cache.StartRefresher` starts a background fetch on process start, then every **15 minutes**. The HTTP server binds immediately (`/healthz` is `starting` until the first fetch finishes) so a slow or failing GitHub Search cannot delay listen or trip TCP liveness. Until that fetch lands, `GET /` looks like an empty catalog — **No matching issues**, no starting banner (amber is `degraded` only; red is first-fetch failure). Browsers never call GitHub.
 2. Fixed Search query: `org:kubernetes-sigs is:issue is:open label:"good first issue" no:assignee`
-3. Pagination: 100 items/page, **max 10 pages** (~1000 results — GitHub Search cap). Stops early when a page is short or unique results reach GitHub's `total_count` (often fewer than 10 calls). Sorted `created` desc. HTTP client timeout 30s, `Accept: application/vnd.github+json`, `User-Agent: k8s-sigs-scout`. Duplicate `html_url` values are dropped, including across pages. A later-page error returns **nil** (in-progress pages discarded) so `cache.Set` can keep the last good snapshot instead of publishing a truncated catalog.
+3. Pagination: 100 items/page, **max 10 pages** (~1000 results — GitHub Search cap). Stops early when a page is short or unique results reach GitHub's `total_count` (often fewer than 10 calls). Sorted `created` desc. HTTP client timeout 30s, `Accept: application/vnd.github+json`, `User-Agent: k8s-sigs-scout`. Duplicate `html_url` values are dropped, including across pages. A later-page HTTP error **or** HTTP 200 with `incomplete_results: true` (GitHub Search timeout — a partial page, often with a lowered `total_count`) returns **nil** so `cache.Set` keeps the last complete snapshot instead of silently shrinking the catalog. GHCR through **v0.10.0** still treats that 200 as success.
 4. A failed refresh keeps the last good snapshot (`degraded`). A first-fetch failure with an empty cache is `error`. `Get`/`Set` copy the slice so callers cannot alias the snapshot.
 5. Filters and sort run in memory (`internal/filter`). `lang` matches `LanguageHints` only. Repo dropdown options are the distinct repositories in the **full** cache, not the current filter. Equal sort keys break on `HTMLURL`.
 6. **New since last visit** uses `localStorage` key `k8s-scout:lastVisit`. The header count is **the current page only**. **Mark seen**, tab hide (`visibilitychange`), and page unload all write the timestamp. First visit shows `—`.
@@ -138,8 +138,9 @@ Kubernetes probes in `deploy/k8s/scout.yaml` are **TCP on 8080**, not this endpo
 
 | Symptom | Likely cause | What to do |
 |---------|--------------|------------|
-| `/healthz` `degraded` / amber banner | GitHub Search failed (often 403 + `rate-limit-remaining=0`), including a later page after page 1 succeeded | Set `GITHUB_TOKEN`. Unauthenticated budget is ~60 req/h; a refresh can use up to 10 Search calls. Partial pages from that refresh are discarded; the previous snapshot stays |
-| `/healthz` 503 `error` | First refresh failed; RAM is empty | Same as above. UI shows a hard error, not stale data |
+| `/healthz` `degraded` / amber banner | GitHub Search failed: 403 + `rate-limit-remaining=0`, a later-page error, or HTTP 200 + `incomplete_results` (`GitHub Search API returned incomplete results (page N)`) | Set `GITHUB_TOKEN`. Unauthenticated budget is ~60 req/h; a refresh can use up to 10 Search calls. That refresh's partial pages are discarded; the previous snapshot stays |
+| Cached count dropped, `/healthz` still `ok` | Published GHCR / pin treats Search timeout (`incomplete_results`) as a full snapshot | Build from this tree. Current `main` fails that refresh (`degraded`) and keeps the last complete list |
+| `/healthz` 503 `error` | First refresh failed; RAM is empty | Same as the `degraded` row. UI shows a hard error, not stale data |
 | `/healthz` stays `starting` / UI shows 0 issues | First Search still running in the background; the dashboard has no loading banner | Wait for `cache refreshed` in logs, or set `GITHUB_TOKEN`. Reload `/` after `/healthz` is `ok` |
 | Pod CrashLoop on **published** GHCR (`v0.10.0` / `:latest`) | Those tags still run the first Search **before** listen (up to 10 × 30s) | Build from this tree, or create `GITHUB_TOKEN` before start. Fixed on `main` |
 | Compose `PORT=3000` but the process still listens on 8080 | Compose maps host `PORT` → container `8080` | Open `http://localhost:3000`. To change the listen port, run the binary with `PORT=…` (not compose) |

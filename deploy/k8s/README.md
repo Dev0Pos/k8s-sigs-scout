@@ -6,7 +6,7 @@ Self-contained stack in namespace `k8s-scout` (own Loki/Grafana; does not depend
 |-----------|---------|--------|
 | **k8s-scout** | dashboard (`LOG_FORMAT=json`, image tag **pinned** in `scout.yaml`) | NodePort **30808** |
 | **Loki** | log store (`grafana/loki:3.4.2`, filesystem, 5Gi `local-path` PVC, samples older than 168h rejected) | ClusterIP `:3100` |
-| **Promtail** | ships **scout** pod logs → Loki (DaemonSet) | hostPath `/var/log/pods` |
+| **Promtail** | ships **scout** pod logs → Loki (`grafana/promtail:3.4.2` DaemonSet) | hostPath `/var/log/pods` |
 | **Grafana** | Explore + preloaded dashboard (`grafana/grafana:11.5.2`) | NodePort **30300** (`admin` / `scout`) |
 
 ## Install (on the cluster host)
@@ -29,11 +29,12 @@ kubectl apply -f namespace.yaml -f loki.yaml -f promtail.yaml -f grafana.yaml -f
 
 `scout.yaml` pins `ghcr.io/dev0pos/k8s-sigs-scout:v0.9.0` (`imagePullPolicy: IfNotPresent`). Newer git tags (for example `v0.10.0`) are **not** picked up until you bump that tag and roll the deployment.
 
-That pin lags three changes already on `main`:
+That pin lags four changes already on `main`:
 
 - **First fetch:** `v0.9.0` / `v0.10.0` run GitHub Search on the main goroutine **before** listen. Current `cache.StartRefresher` returns immediately; `/healthz` is `starting` until the background fetch finishes. A hung unauthenticated Search on the pin can trip TCP liveness (`initialDelaySeconds: 10`, period 20s).
 - **Language filter:** those tags still substring-match repo + labels, so `lang=go` matches the words in `good first issue`. Current `internal/filter` matches `LanguageHints` only (hub README).
 - **Runtime image:** those tags are Alpine **3.24** / `USER nobody`. Current `Dockerfile` is `scratch` (`USER 65532:65532`, no shell). After you bump to a scratch-based tag, use logs and `/healthz` instead of `kubectl exec`.
+- **Search timeout:** those tags treat HTTP 200 + `incomplete_results: true` as a complete snapshot, so a timed-out refresh can shrink the catalog with no amber banner. Current `internal/github` fails that fetch (nil slice) and the cache stays `degraded`.
 
 The dashboard HTML loads Tailwind (`cdn.tailwindcss.com`) and HTMX 2.0.4 (`unpkg.com`). Browsers that cannot reach those CDNs get an unstyled page; filter changes need HTMX, but a full load of a `/?q=…&lang=…` URL still works.
 
@@ -101,7 +102,8 @@ Useful app log lines (JSON `msg`): `listening`, `github api auth` (`enabled` boo
 
 | Symptom | Likely cause | What to do |
 |---------|--------------|------------|
-| Scout Ready but UI amber / `/healthz` `degraded` | GitHub Search 403 / rate limit (including a later page after page 1 succeeded) | Create `k8s-scout-github` (see above). That refresh's partial pages are discarded; the previous snapshot stays. TCP probes will still pass |
+| Scout Ready but UI amber / `/healthz` `degraded` | GitHub Search 403 / rate limit, a later-page error, or HTTP 200 + `incomplete_results` (`incomplete results (page N)`) | Create `k8s-scout-github` (see above). That refresh's partial pages are discarded; the previous snapshot stays. TCP probes will still pass |
+| Cached count dropped, `/healthz` still `ok` | Pinned `v0.9.0` / published `v0.10.0` accept Search timeout pages as success | Expected on this pin. Bump to a tag that fails `incomplete_results`, or wait for a later 15m refresh to recover |
 | Scout Ready but UI empty / "No matching issues" | Current images bind before the first snapshot (`/healthz` `starting`) | Wait for log `cache refreshed`, then reload. Pinned `v0.9.0` should not show this — it only becomes Ready after the first fetch returns |
 | Scout `/healthz` 503 | First refresh failed; empty cache | Same token fix. Check logs: `{namespace="k8s-scout", app="k8s-scout"} \|= "cache refresh failed"` |
 | Scout CrashLoop / `install.sh` rollout timeout | Pinned `v0.9.0` runs first Search **before** listen; unauthenticated Search can exceed liveness (~50s) | Create `k8s-scout-github` before apply, or bump the image to a tag with background first-refresh. `kubectl -n k8s-scout logs deploy/k8s-scout` |
