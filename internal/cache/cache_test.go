@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -321,5 +322,87 @@ func TestStartRefresherFailedRefreshKeepsSnapshot(t *testing.T) {
 	got, _, err := c.Get()
 	if err != nil || len(got) != 1 || got[0].Title != "Stale" {
 		t.Fatalf("failed refresh must keep last snapshot: %v %v", got, err)
+	}
+}
+
+func TestStartRefresherIncompleteResultsKeepsSnapshot(t *testing.T) {
+	// GitHub Search timeouts are HTTP 200 + incomplete_results (PR #22).
+	// A later refresh must not replace a complete snapshot with that partial page.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"total_count":        40,
+			"incomplete_results": true,
+			"items": []map[string]any{{
+				"title":          "TimeoutPartial",
+				"html_url":       "https://github.com/kubernetes-sigs/kind/issues/99",
+				"comments":       0,
+				"created_at":     time.Date(2025, 1, 2, 0, 0, 0, 0, time.UTC),
+				"labels":         []map[string]string{{"name": "good first issue"}},
+				"repository_url": "https://api.github.com/repos/kubernetes-sigs/kind",
+			}},
+		})
+	}))
+	t.Cleanup(srv.Close)
+
+	prev := github.DefaultClient
+	github.DefaultClient = &github.Client{HTTP: srv.Client(), BaseURL: srv.URL, PerPage: 100}
+	t.Cleanup(func() { github.DefaultClient = prev })
+
+	c := &cache.Cache{}
+	c.Set([]issue.Issue{
+		{Title: "CachedOne", Repository: "kubernetes-sigs/kind", HTMLURL: "https://github.com/kubernetes-sigs/kind/issues/1"},
+		{Title: "CachedTwo", Repository: "kubernetes-sigs/kind", HTMLURL: "https://github.com/kubernetes-sigs/kind/issues/2"},
+	}, nil)
+
+	cache.StartRefresher(c, time.Hour)
+	h := waitHealth(t, c, "degraded")
+	if h.Issues != 2 || !strings.Contains(h.Error, "incomplete results") {
+		t.Fatalf("health = %+v, want degraded with 2 issues", h)
+	}
+
+	got, _, err := c.Get()
+	if err != nil || len(got) != 2 || got[0].Title != "CachedOne" || got[1].Title != "CachedTwo" {
+		t.Fatalf("incomplete Search must keep the last complete snapshot: %v %v", got, err)
+	}
+	for _, iss := range got {
+		if iss.Title == "TimeoutPartial" {
+			t.Fatal("partial timeout page was published into the cache")
+		}
+	}
+}
+
+func TestStartRefresherIncompleteResultsFirstFetchIsError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"total_count":        40,
+			"incomplete_results": true,
+			"items": []map[string]any{{
+				"title":          "TimeoutPartial",
+				"html_url":       "https://github.com/kubernetes-sigs/kind/issues/99",
+				"comments":       0,
+				"created_at":     time.Date(2025, 1, 2, 0, 0, 0, 0, time.UTC),
+				"labels":         []map[string]string{{"name": "good first issue"}},
+				"repository_url": "https://api.github.com/repos/kubernetes-sigs/kind",
+			}},
+		})
+	}))
+	t.Cleanup(srv.Close)
+
+	prev := github.DefaultClient
+	github.DefaultClient = &github.Client{HTTP: srv.Client(), BaseURL: srv.URL, PerPage: 100}
+	t.Cleanup(func() { github.DefaultClient = prev })
+
+	c := &cache.Cache{}
+	cache.StartRefresher(c, time.Hour)
+	h := waitHealth(t, c, "error")
+	if h.Issues != 0 || !strings.Contains(h.Error, "incomplete results") {
+		t.Fatalf("health = %+v, want empty error snapshot", h)
+	}
+
+	got, _, err := c.Get()
+	if err == nil || len(got) != 0 {
+		t.Fatalf("first Search timeout must not publish a partial catalog: %v %v", got, err)
 	}
 }

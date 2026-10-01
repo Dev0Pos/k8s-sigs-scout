@@ -851,3 +851,150 @@ func TestIndexCacheDegradedKeepsIssues(t *testing.T) {
 		t.Fatalf("degraded healthz = %d, want 200", health.Code)
 	}
 }
+
+func TestIndexIncompleteRefreshKeepsCatalog(t *testing.T) {
+	// User-facing PR #22 contract: a Search timeout (HTTP 200 + incomplete_results)
+	// must not silently shrink the dashboard. Keep the last complete catalog and
+	// show the amber degraded banner; /healthz stays 200.
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"total_count":        40,
+			"incomplete_results": true,
+			"items": []map[string]any{{
+				"title":          "TimeoutPartial",
+				"html_url":       "https://github.com/kubernetes-sigs/kind/issues/99",
+				"comments":       0,
+				"created_at":     time.Date(2025, 1, 2, 0, 0, 0, 0, time.UTC),
+				"labels":         []map[string]string{{"name": "good first issue"}},
+				"repository_url": "https://api.github.com/repos/kubernetes-sigs/kind",
+			}},
+		})
+	}))
+	t.Cleanup(upstream.Close)
+
+	prev := github.DefaultClient
+	github.DefaultClient = &github.Client{HTTP: upstream.Client(), BaseURL: upstream.URL, PerPage: 100}
+	t.Cleanup(func() { github.DefaultClient = prev })
+
+	c := &cache.Cache{}
+	c.Set([]issue.Issue{
+		{Title: "CachedOne", Repository: "kubernetes-sigs/kind", HTMLURL: "https://example.com/1"},
+		{Title: "CachedTwo", Repository: "kubernetes-sigs/cluster-api", HTMLURL: "https://example.com/2"},
+	}, nil)
+	srv, err := server.New(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cache.StartRefresher(c, time.Hour)
+	deadline := time.Now().Add(2 * time.Second)
+	var h cache.Health
+	for time.Now().Before(deadline) {
+		h = c.HealthSnapshot()
+		if h.Status == "degraded" {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if h.Status != "degraded" || h.Issues != 2 {
+		t.Fatalf("cache never became degraded with 2 issues: %+v", h)
+	}
+
+	page := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(page, httptest.NewRequest(http.MethodGet, "/", nil))
+	if page.Code != http.StatusOK {
+		t.Fatalf("GET / = %d, want 200", page.Code)
+	}
+	body := page.Body.String()
+	if !strings.Contains(body, ">CachedOne<") || !strings.Contains(body, ">CachedTwo<") {
+		t.Fatalf("timeout refresh dropped the last complete catalog: %s", body)
+	}
+	if strings.Contains(body, ">TimeoutPartial<") {
+		t.Fatal("partial timeout page leaked into the dashboard")
+	}
+	if !strings.Contains(body, "Showing cached data") {
+		t.Fatal("missing degraded banner after Search timeout")
+	}
+	if strings.Contains(body, "Failed to load issues") {
+		t.Fatal("timeout after a good snapshot must not look like an empty-load failure")
+	}
+	if !strings.Contains(body, "Last refresh:") {
+		t.Fatal("degraded catalog must still show Last refresh from the last good snapshot")
+	}
+
+	health := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(health, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+	if health.Code != http.StatusOK {
+		t.Fatalf("degraded healthz after timeout = %d, want 200", health.Code)
+	}
+	var probe cache.Health
+	if err := json.NewDecoder(health.Body).Decode(&probe); err != nil {
+		t.Fatal(err)
+	}
+	if probe.Status != "degraded" || probe.Issues != 2 || !strings.Contains(probe.Error, "incomplete results") {
+		t.Fatalf("healthz after Search timeout = %+v", probe)
+	}
+}
+
+func TestIndexFirstIncompleteFetchIsError(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"total_count":        40,
+			"incomplete_results": true,
+			"items": []map[string]any{{
+				"title":          "TimeoutPartial",
+				"html_url":       "https://github.com/kubernetes-sigs/kind/issues/99",
+				"comments":       0,
+				"created_at":     time.Date(2025, 1, 2, 0, 0, 0, 0, time.UTC),
+				"labels":         []map[string]string{{"name": "good first issue"}},
+				"repository_url": "https://api.github.com/repos/kubernetes-sigs/kind",
+			}},
+		})
+	}))
+	t.Cleanup(upstream.Close)
+
+	prev := github.DefaultClient
+	github.DefaultClient = &github.Client{HTTP: upstream.Client(), BaseURL: upstream.URL, PerPage: 100}
+	t.Cleanup(func() { github.DefaultClient = prev })
+
+	c := &cache.Cache{}
+	srv, err := server.New(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cache.StartRefresher(c, time.Hour)
+	deadline := time.Now().Add(2 * time.Second)
+	var h cache.Health
+	for time.Now().Before(deadline) {
+		h = c.HealthSnapshot()
+		if h.Status == "error" {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if h.Status != "error" || h.Issues != 0 {
+		t.Fatalf("first Search timeout must stay an empty error cache: %+v", h)
+	}
+
+	page := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(page, httptest.NewRequest(http.MethodGet, "/", nil))
+	body := page.Body.String()
+	if !strings.Contains(body, "Failed to load issues") {
+		t.Fatalf("first Search timeout should be a load failure: %s", body)
+	}
+	if strings.Contains(body, ">TimeoutPartial<") {
+		t.Fatal("partial timeout page was shown as the catalog")
+	}
+	if strings.Contains(body, "Showing cached data") {
+		t.Fatal("first-fetch timeout must not look like a degraded snapshot")
+	}
+
+	health := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(health, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+	if health.Code != http.StatusServiceUnavailable {
+		t.Fatalf("first-fetch timeout healthz = %d, want 503", health.Code)
+	}
+}
