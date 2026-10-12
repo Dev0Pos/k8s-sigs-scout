@@ -372,6 +372,79 @@ func TestStartRefresherIncompleteResultsKeepsSnapshot(t *testing.T) {
 	}
 }
 
+func TestStartRefresherSuccessfulRefreshClearsDegraded(t *testing.T) {
+	// Recovery half of PR #22: after a failed refresh the next complete Search
+	// must replace the stale snapshot and leave the cache ok — not stay degraded
+	// with the old list, and not keep lastErr after a good fetch.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"total_count": 1,
+			"items": []map[string]any{{
+				"title":          "Recovered",
+				"html_url":       "https://github.com/kubernetes-sigs/kind/issues/11",
+				"comments":       0,
+				"created_at":     time.Date(2025, 1, 2, 0, 0, 0, 0, time.UTC),
+				"labels":         []map[string]string{{"name": "good first issue"}},
+				"repository_url": "https://api.github.com/repos/kubernetes-sigs/kind",
+			}},
+		})
+	}))
+	t.Cleanup(srv.Close)
+
+	prev := github.DefaultClient
+	github.DefaultClient = &github.Client{HTTP: srv.Client(), BaseURL: srv.URL, PerPage: 10}
+	t.Cleanup(func() { github.DefaultClient = prev })
+
+	c := &cache.Cache{}
+	c.Set([]issue.Issue{
+		{Title: "StaleOne", Repository: "kubernetes-sigs/kind", HTMLURL: "https://github.com/kubernetes-sigs/kind/issues/1"},
+		{Title: "StaleTwo", Repository: "kubernetes-sigs/kind", HTMLURL: "https://github.com/kubernetes-sigs/kind/issues/2"},
+	}, nil)
+	c.Set(nil, errors.New("boom"))
+	if h := c.HealthSnapshot(); h.Status != "degraded" || h.Issues != 2 {
+		t.Fatalf("precondition: want degraded with 2 issues, got %+v", h)
+	}
+
+	cache.StartRefresher(c, time.Hour)
+	h := waitHealth(t, c, "ok")
+	if h.Issues != 1 || h.Error != "" {
+		t.Fatalf("health after recovery = %+v, want ok with 1 issue and no error", h)
+	}
+
+	got, _, err := c.Get()
+	if err != nil || len(got) != 1 || got[0].Title != "Recovered" {
+		t.Fatalf("successful refresh must replace the stale snapshot: %v %v", got, err)
+	}
+	for _, iss := range got {
+		if iss.Title == "StaleOne" || iss.Title == "StaleTwo" {
+			t.Fatal("stale issues remained after a complete refresh")
+		}
+	}
+}
+
+func TestHealthSuccessfulEmptyCatalogIsStartingNotError(t *testing.T) {
+	// A complete Search that finds nothing is still a successful snapshot:
+	// stamp updated_at, do not set Get error, and do not report probe status
+	// error (that is reserved for a failed first fetch).
+	c := &cache.Cache{}
+	c.Set(nil, nil)
+	got, updatedAt, err := c.Get()
+	if err != nil || len(got) != 0 || updatedAt.IsZero() {
+		t.Fatalf("successful empty Get = %v %v %v", got, updatedAt, err)
+	}
+	h := c.HealthSnapshot()
+	if h.Status != "starting" || h.Issues != 0 || h.Error != "" {
+		t.Fatalf("successful empty health = %+v, want starting without error", h)
+	}
+	if h.UpdatedAt == "" {
+		t.Fatal("successful empty snapshot must stamp updated_at")
+	}
+	if _, parseErr := time.Parse(time.RFC3339, h.UpdatedAt); parseErr != nil {
+		t.Fatalf("updated_at %q is not RFC3339: %v", h.UpdatedAt, parseErr)
+	}
+}
+
 func TestStartRefresherIncompleteResultsFirstFetchIsError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
