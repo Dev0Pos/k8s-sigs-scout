@@ -46,7 +46,7 @@ kubectl -n k8s-scout rollout restart deploy/k8s-scout
 
 ### GitHub token (optional)
 
-Higher Search API rate limits. Secret is optional in the pod spec (`optional: true`); without it the app stays unauthenticated.
+Higher Search API rate limits. Secret is optional in the pod spec (`optional: true`); without it the app stays unauthenticated. The process reads `GITHUB_TOKEN` **once at start** — creating or rotating the secret has no effect until restart.
 
 ```bash
 kubectl -n k8s-scout create secret generic k8s-scout-github \
