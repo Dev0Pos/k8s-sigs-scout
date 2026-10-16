@@ -92,6 +92,9 @@ func TestIndexHasCopyURLButton(t *testing.T) {
 	if !strings.Contains(body, `id="new-since-count"`) || !strings.Contains(body, `id="mark-seen"`) {
 		t.Fatal("missing new-since-visit header controls")
 	}
+	if strings.Contains(body, `name="page"`) {
+		t.Fatal("filter form must omit page so changing q/lang/repo/sort resets to page 1")
+	}
 }
 
 func TestResultsExposeCreatedAttr(t *testing.T) {
@@ -113,6 +116,31 @@ func TestResultsExposeCreatedAttr(t *testing.T) {
 	}
 	if !strings.Contains(body, `data-new-badge`) {
 		t.Fatal("missing new badge placeholder")
+	}
+}
+
+func TestResultsCreatedAtNormalizedToUTC(t *testing.T) {
+	// New-since-visit JS Date.parse()s data-created. A non-UTC wall clock
+	// stamped with a Z suffix (or left in a local offset) would mis-mark cards.
+	est := time.FixedZone("EST", -5*3600)
+	created := time.Date(2025, 6, 1, 8, 0, 0, 0, est) // 13:00 UTC
+	store := fakeStore{issues: []issue.Issue{
+		{Title: "Fresh", Repository: "kubernetes-sigs/kind", HTMLURL: "https://example.com/1", CreatedAt: created},
+	}}
+	srv, err := server.New(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("HX-Request", "true")
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	body := rec.Body.String()
+	if !strings.Contains(body, `data-created="2025-06-01T13:00:00Z"`) {
+		t.Fatalf("data-created must be UTC: %s", body)
+	}
+	if strings.Contains(body, `data-created="2025-06-01T08:00:00`) {
+		t.Fatal("local wall clock must not be published as data-created")
 	}
 }
 
@@ -446,6 +474,12 @@ func TestIndexRepoDropdownUsesFullCache(t *testing.T) {
 	}
 	if !strings.Contains(body, "(filtered from 2)") {
 		t.Fatalf("missing filtered-from-total hint: %s", body)
+	}
+	if !strings.Contains(body, `data-stat="total">2<`) {
+		t.Fatal("Cached header must stay the unfiltered cache size")
+	}
+	if !strings.Contains(body, ">1–1<") {
+		t.Fatalf("results should show From–To of the filtered page: %s", body)
 	}
 }
 
@@ -996,5 +1030,205 @@ func TestIndexFirstIncompleteFetchIsError(t *testing.T) {
 	srv.Handler().ServeHTTP(health, httptest.NewRequest(http.MethodGet, "/healthz", nil))
 	if health.Code != http.StatusServiceUnavailable {
 		t.Fatalf("first-fetch timeout healthz = %d, want 503", health.Code)
+	}
+}
+
+func TestIndexSuccessfulRefreshClearsDegradedBanner(t *testing.T) {
+	// User-facing recovery after PR #22: a later complete Search must replace
+	// the stale catalog, drop the amber banner, and make /healthz ok.
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"total_count": 1,
+			"items": []map[string]any{{
+				"title":          "Recovered",
+				"html_url":       "https://github.com/kubernetes-sigs/kind/issues/11",
+				"comments":       0,
+				"created_at":     time.Date(2025, 1, 2, 0, 0, 0, 0, time.UTC),
+				"labels":         []map[string]string{{"name": "good first issue"}},
+				"repository_url": "https://api.github.com/repos/kubernetes-sigs/kind",
+			}},
+		})
+	}))
+	t.Cleanup(upstream.Close)
+
+	prev := github.DefaultClient
+	github.DefaultClient = &github.Client{HTTP: upstream.Client(), BaseURL: upstream.URL, PerPage: 10}
+	t.Cleanup(func() { github.DefaultClient = prev })
+
+	c := &cache.Cache{}
+	c.Set([]issue.Issue{
+		{Title: "StaleOne", Repository: "kubernetes-sigs/kind", HTMLURL: "https://example.com/1"},
+		{Title: "StaleTwo", Repository: "kubernetes-sigs/cluster-api", HTMLURL: "https://example.com/2"},
+	}, nil)
+	c.Set(nil, errors.New("github 403"))
+	srv, err := server.New(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cache.StartRefresher(c, time.Hour)
+	deadline := time.Now().Add(2 * time.Second)
+	var h cache.Health
+	for time.Now().Before(deadline) {
+		h = c.HealthSnapshot()
+		if h.Status == "ok" {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if h.Status != "ok" || h.Issues != 1 || h.Error != "" {
+		t.Fatalf("cache never recovered to ok with 1 issue: %+v", h)
+	}
+
+	page := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(page, httptest.NewRequest(http.MethodGet, "/", nil))
+	if page.Code != http.StatusOK {
+		t.Fatalf("GET / = %d, want 200", page.Code)
+	}
+	body := page.Body.String()
+	if !strings.Contains(body, ">Recovered<") {
+		t.Fatalf("dashboard missing recovered issue: %s", body)
+	}
+	if strings.Contains(body, ">StaleOne<") || strings.Contains(body, ">StaleTwo<") {
+		t.Fatal("stale catalog remained after a complete refresh")
+	}
+	if strings.Contains(body, "Showing cached data") {
+		t.Fatal("amber banner must clear after a successful refresh")
+	}
+	if strings.Contains(body, "Failed to load issues") {
+		t.Fatal("recovered catalog must not look like a load failure")
+	}
+	if !strings.Contains(body, "Last refresh:") {
+		t.Fatal("ok catalog must show Last refresh")
+	}
+
+	health := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(health, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+	if health.Code != http.StatusOK {
+		t.Fatalf("recovered healthz = %d, want 200", health.Code)
+	}
+	var probe cache.Health
+	if err := json.NewDecoder(health.Body).Decode(&probe); err != nil {
+		t.Fatal(err)
+	}
+	if probe.Status != "ok" || probe.Issues != 1 || probe.Error != "" {
+		t.Fatalf("healthz after recovery = %+v", probe)
+	}
+}
+
+func TestIndexLastRefreshRFC822MatchesHealthz(t *testing.T) {
+	// Dashboard Last refresh is RFC822 of the same snapshot instant that
+	// /healthz reports as RFC3339 updated_at (operator comparison contract).
+	c := &cache.Cache{}
+	c.Set([]issue.Issue{{
+		Title:      "One",
+		Repository: "kubernetes-sigs/kind",
+		HTMLURL:    "https://example.com/1",
+	}}, nil)
+	_, updatedAt, err := c.Get()
+	if err != nil || updatedAt.IsZero() {
+		t.Fatalf("Get = %v %v", updatedAt, err)
+	}
+	srv, err := server.New(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	page := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(page, httptest.NewRequest(http.MethodGet, "/", nil))
+	wantRefresh := updatedAt.Format(time.RFC822)
+	if !strings.Contains(page.Body.String(), "Last refresh:") {
+		t.Fatal("missing Last refresh")
+	}
+	if !strings.Contains(page.Body.String(), wantRefresh) {
+		t.Fatalf("Last refresh should be RFC822 %q: %s", wantRefresh, page.Body.String())
+	}
+
+	health := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(health, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+	var probe cache.Health
+	if err := json.NewDecoder(health.Body).Decode(&probe); err != nil {
+		t.Fatal(err)
+	}
+	if probe.UpdatedAt != updatedAt.Format(time.RFC3339) {
+		t.Fatalf("healthz updated_at = %q, want RFC3339 %q", probe.UpdatedAt, updatedAt.Format(time.RFC3339))
+	}
+}
+
+func TestIndexEscapesHTMLURL(t *testing.T) {
+	store := fakeStore{issues: []issue.Issue{
+		{
+			Title:      "Safe title",
+			Repository: `kind"><img src=x onerror=alert(1)>`,
+			HTMLURL:    `javascript:alert("xss")`,
+		},
+		{
+			Title:      "Also safe",
+			Repository: "kubernetes-sigs/kind",
+			HTMLURL:    `https://example.com/1"><script>alert(1)</script>`,
+		},
+	}}
+	srv, err := server.New(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+	body := rec.Body.String()
+	if strings.Contains(body, `javascript:alert("xss")`) || strings.Contains(body, "javascript:alert") {
+		t.Fatal("javascript: HTMLURL must not appear as a live href")
+	}
+	if strings.Contains(body, `<script>alert(1)</script>`) {
+		t.Fatal("raw script from HTMLURL must not appear")
+	}
+	if strings.Contains(body, `kind"><img src=x onerror=alert(1)>`) {
+		t.Fatal("raw repo must not break out of the issue card")
+	}
+	if !strings.Contains(body, ">Safe title<") || !strings.Contains(body, ">Also safe<") {
+		t.Fatalf("escaped issues should still render: %s", body)
+	}
+}
+
+func TestIndexSuccessfulEmptyCatalogNotLoadFailure(t *testing.T) {
+	// Complete Search with zero items is not a first-fetch error: no red banner,
+	// Last refresh is set, /healthz stays 200 (starting, not 503).
+	c := &cache.Cache{}
+	c.Set(nil, nil)
+	srv, err := server.New(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	page := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(page, httptest.NewRequest(http.MethodGet, "/", nil))
+	if page.Code != http.StatusOK {
+		t.Fatalf("GET / = %d, want 200", page.Code)
+	}
+	body := page.Body.String()
+	if !strings.Contains(body, "No matching issues.") {
+		t.Fatalf("empty success should look like an empty catalog: %s", body)
+	}
+	if strings.Contains(body, "Failed to load issues") {
+		t.Fatal("successful empty fetch must not look like a GitHub load failure")
+	}
+	if strings.Contains(body, "Showing cached data") {
+		t.Fatal("successful empty fetch must not show the degraded banner")
+	}
+	if !strings.Contains(body, "Last refresh:") {
+		t.Fatal("successful empty snapshot must still show Last refresh")
+	}
+
+	health := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(health, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+	if health.Code != http.StatusOK {
+		t.Fatalf("empty-success healthz = %d, want 200 (not 503)", health.Code)
+	}
+	var probe cache.Health
+	if err := json.NewDecoder(health.Body).Decode(&probe); err != nil {
+		t.Fatal(err)
+	}
+	if probe.Status == "error" || probe.Error != "" || probe.Issues != 0 || probe.UpdatedAt == "" {
+		t.Fatalf("empty-success healthz = %+v, want non-error snapshot with updated_at", probe)
 	}
 }
