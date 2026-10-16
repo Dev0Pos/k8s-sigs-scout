@@ -92,6 +92,9 @@ func TestIndexHasCopyURLButton(t *testing.T) {
 	if !strings.Contains(body, `id="new-since-count"`) || !strings.Contains(body, `id="mark-seen"`) {
 		t.Fatal("missing new-since-visit header controls")
 	}
+	if strings.Contains(body, `name="page"`) {
+		t.Fatal("filter form must omit page so changing q/lang/repo/sort resets to page 1")
+	}
 }
 
 func TestResultsExposeCreatedAttr(t *testing.T) {
@@ -113,6 +116,31 @@ func TestResultsExposeCreatedAttr(t *testing.T) {
 	}
 	if !strings.Contains(body, `data-new-badge`) {
 		t.Fatal("missing new badge placeholder")
+	}
+}
+
+func TestResultsCreatedAtNormalizedToUTC(t *testing.T) {
+	// New-since-visit JS Date.parse()s data-created. A non-UTC wall clock
+	// stamped with a Z suffix (or left in a local offset) would mis-mark cards.
+	est := time.FixedZone("EST", -5*3600)
+	created := time.Date(2025, 6, 1, 8, 0, 0, 0, est) // 13:00 UTC
+	store := fakeStore{issues: []issue.Issue{
+		{Title: "Fresh", Repository: "kubernetes-sigs/kind", HTMLURL: "https://example.com/1", CreatedAt: created},
+	}}
+	srv, err := server.New(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("HX-Request", "true")
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	body := rec.Body.String()
+	if !strings.Contains(body, `data-created="2025-06-01T13:00:00Z"`) {
+		t.Fatalf("data-created must be UTC: %s", body)
+	}
+	if strings.Contains(body, `data-created="2025-06-01T08:00:00`) {
+		t.Fatal("local wall clock must not be published as data-created")
 	}
 }
 
@@ -446,6 +474,12 @@ func TestIndexRepoDropdownUsesFullCache(t *testing.T) {
 	}
 	if !strings.Contains(body, "(filtered from 2)") {
 		t.Fatalf("missing filtered-from-total hint: %s", body)
+	}
+	if !strings.Contains(body, `data-stat="total">2<`) {
+		t.Fatal("Cached header must stay the unfiltered cache size")
+	}
+	if !strings.Contains(body, ">1–1<") {
+		t.Fatalf("results should show From–To of the filtered page: %s", body)
 	}
 }
 

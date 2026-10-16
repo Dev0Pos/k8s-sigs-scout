@@ -12,6 +12,58 @@ import (
 	"k8s-scout/internal/github"
 )
 
+func TestClientFetchIssuesMapsCreatedAtCommentsAndLabels(t *testing.T) {
+	// New-since-visit, newest/comments sort, and q-on-labels all read these
+	// fields from Search JSON. Dropping any of them fails silently in the UI.
+	created := time.Date(2025, 6, 1, 12, 34, 56, 0, time.UTC)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"total_count": 1,
+			"items": []map[string]any{{
+				"title":          "Mapped",
+				"html_url":       "https://github.com/kubernetes-sigs/kind/issues/42",
+				"comments":       7,
+				"created_at":     created,
+				"labels":         []map[string]string{{"name": "good first issue"}, {"name": "kind/documentation"}},
+				"repository_url": "https://api.github.com/repos/kubernetes-sigs/kind",
+			}},
+		})
+	}))
+	t.Cleanup(srv.Close)
+
+	client := &github.Client{HTTP: srv.Client(), BaseURL: srv.URL, PerPage: 1}
+	got, err := client.FetchIssues()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("len = %d, want 1", len(got))
+	}
+	iss := got[0]
+	if iss.Title != "Mapped" {
+		t.Fatalf("title = %q", iss.Title)
+	}
+	if iss.HTMLURL != "https://github.com/kubernetes-sigs/kind/issues/42" {
+		t.Fatalf("html_url = %q", iss.HTMLURL)
+	}
+	if iss.Comments != 7 {
+		t.Fatalf("comments = %d, want 7", iss.Comments)
+	}
+	if !iss.CreatedAt.Equal(created) {
+		t.Fatalf("created_at = %v, want %v", iss.CreatedAt, created)
+	}
+	if iss.Repository != "kubernetes-sigs/kind" {
+		t.Fatalf("repository = %q", iss.Repository)
+	}
+	if len(iss.Labels) != 2 || iss.Labels[0] != "good first issue" || iss.Labels[1] != "kind/documentation" {
+		t.Fatalf("labels = %v", iss.Labels)
+	}
+	if len(iss.LanguageHints) == 0 || iss.LanguageHints[0] != "docs" {
+		t.Fatalf("LanguageHints = %v, want docs from kind/documentation", iss.LanguageHints)
+	}
+}
+
 func TestClientFetchIssuesSearchContract(t *testing.T) {
 	const wantQ = `org:kubernetes-sigs is:issue is:open label:"good first issue" no:assignee`
 	var gotQ, gotSort, gotOrder string

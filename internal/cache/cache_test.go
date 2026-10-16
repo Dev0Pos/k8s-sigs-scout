@@ -111,6 +111,34 @@ func TestHealthDegraded(t *testing.T) {
 	}
 }
 
+func TestSetFailureDoesNotAdvanceUpdatedAt(t *testing.T) {
+	// Last refresh / healthz updated_at must stay the last successful snapshot.
+	// A failed refresh that stamped Now() would make stale data look fresh.
+	c := &cache.Cache{}
+	c.Set([]issue.Issue{{Title: "one", Repository: "kubernetes-sigs/kind"}}, nil)
+	_, successAt, err := c.Get()
+	if err != nil || successAt.IsZero() {
+		t.Fatalf("Get after success = %v %v", successAt, err)
+	}
+	before := c.HealthSnapshot()
+	if before.UpdatedAt == "" {
+		t.Fatal("successful snapshot must stamp updated_at")
+	}
+
+	c.Set(nil, errors.New("boom"))
+	got, failedAt, err := c.Get()
+	if err != nil || len(got) != 1 || got[0].Title != "one" {
+		t.Fatalf("failed Set must keep snapshot: %v %v", got, err)
+	}
+	if !failedAt.Equal(successAt) {
+		t.Fatalf("failed refresh advanced updatedAt from %v to %v", successAt, failedAt)
+	}
+	h := c.HealthSnapshot()
+	if h.Status != "degraded" || h.UpdatedAt != before.UpdatedAt || h.Error != "boom" {
+		t.Fatalf("health after failed refresh = %+v, want same updated_at as %+v", h, before)
+	}
+}
+
 func TestHealthErrorWhenEmpty(t *testing.T) {
 	c := &cache.Cache{}
 	c.Set(nil, errors.New("boom"))

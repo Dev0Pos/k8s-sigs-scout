@@ -158,6 +158,28 @@ func TestIssuesLangGoDoesNotMatchGoodFirstIssueLabel(t *testing.T) {
 	}
 }
 
+func TestIssuesLangAliasesDoNotMatchNormalizedHints(t *testing.T) {
+	// LanguageHints normalizes golang→go and documentation→docs at derivation.
+	// lang compares those stored hints exactly — typed aliases match nothing.
+	issues := []issue.Issue{
+		{Title: "Go helper", Repository: "kubernetes-sigs/kind", LanguageHints: []string{"go"}},
+		{Title: "Docs task", Repository: "kubernetes-sigs/cluster-api", LanguageHints: []string{"docs"}},
+	}
+
+	if got := filter.Issues(issues, "", "golang", ""); len(got) != 0 {
+		t.Fatalf("lang=golang must not match hint go, got %+v", got)
+	}
+	if got := filter.Issues(issues, "", "documentation", ""); len(got) != 0 {
+		t.Fatalf("lang=documentation must not match hint docs, got %+v", got)
+	}
+	if got := filter.Issues(issues, "", "go", ""); len(got) != 1 || got[0].Title != "Go helper" {
+		t.Fatalf("lang=go should still match, got %+v", got)
+	}
+	if got := filter.Issues(issues, "", "docs", ""); len(got) != 1 || got[0].Title != "Docs task" {
+		t.Fatalf("lang=docs should still match, got %+v", got)
+	}
+}
+
 func TestIssuesLangJavaDoesNotMatchJavascript(t *testing.T) {
 	issues := []issue.Issue{
 		{
@@ -210,6 +232,15 @@ func TestSortIssues(t *testing.T) {
 	filter.SortIssues(byTitle, "TITLE")
 	if byTitle[0].Title != "A" {
 		t.Fatalf("title: got %q", byTitle[0].Title)
+	}
+
+	mixed := []issue.Issue{
+		{Title: "Zebra", HTMLURL: "u-z"},
+		{Title: "apple", HTMLURL: "u-a"},
+	}
+	filter.SortIssues(mixed, "title")
+	if mixed[0].Title != "apple" || mixed[1].Title != "Zebra" {
+		t.Fatalf("title sort must be case-insensitive: got %q then %q", mixed[0].Title, mixed[1].Title)
 	}
 
 	for _, mode := range []string{"comments", "newest", "repo", "title"} {
