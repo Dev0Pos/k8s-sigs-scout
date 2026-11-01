@@ -73,6 +73,14 @@ go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.1.6
 golangci-lint run
 ```
 
+`lang` options are not GitHub linguist languages. They are tokens from `issue.LanguageHints` (repo name + labels). To add one:
+
+1. Put the token in the `known` list in `internal/issue/issue.go` (plus an alias→normalized mapping if needed, like `golang` → `go`).
+2. Add the **normalized** value to the Language dropdown in `internal/server/templates/index.html`.
+3. Extend `TestLanguageHints` and the filter tests.
+
+Typed aliases are derivation-only — `?lang=golang` matches nothing even after you add the alias. The dropdown and `?lang=` must use the stored hint (`go`, `docs`).
+
 ## HTTP
 
 | Path | Response |
@@ -114,7 +122,7 @@ Example (field order; equivalent to `/?lang=go&page=2&q=helm&repo=kubernetes-sig
 }
 ```
 
-`updated_at` (RFC3339 UTC), `age_seconds`, and `error` are omitted when empty. The dashboard **Last refresh** is the same `updatedAt` as **RFC822**. Both stay at the last **successful** snapshot during `degraded`. Before the first snapshot:
+`updated_at` (RFC3339 UTC), `age_seconds`, and `error` are omitted when empty. The dashboard **Last refresh** is the same `updatedAt` as **RFC822**. Both stay at the last **successful** snapshot during `degraded` and advance only on the next complete Search. Before the first snapshot:
 
 ```json
 {"status":"starting","issues":0}
@@ -122,19 +130,19 @@ Example (field order; equivalent to `/?lang=go&page=2&q=helm&repo=kubernetes-sig
 
 | `status` | HTTP | Meaning |
 |----------|------|---------|
-| `starting` | 200 | Empty cache, no recorded failure (in-flight first fetch). `ok` requires at least one issue — a successful empty Search would stay `starting` but set `updated_at` |
+| `starting` | 200 | Empty cache, no recorded failure. In-flight first fetch omits `updated_at` / Last refresh. `ok` requires at least one issue — a successful empty Search stays `starting` but **sets** `updated_at` (UI still **No matching issues**, now with Last refresh; not a red banner) |
 | `ok` | 200 | Snapshot present (`issues` > 0), last refresh succeeded |
-| `degraded` | 200 | Snapshot present, last refresh failed (`error` set; UI amber banner) |
+| `degraded` | 200 | Snapshot present, last refresh failed (`error` set; UI amber banner). The next complete Search replaces the stale list, clears `error` / the banner, and returns to `ok` |
 | `error` | 503 | No snapshot and last refresh failed (`error` set; UI red banner) |
 
 Kubernetes probes in `deploy/k8s/scout.yaml` are **TCP on 8080**, not this endpoint — after the process is listening, a GitHub outage does not restart the pod. `/healthz` `starting` is also **200**, so an HTTP probe would pass before data exists. GHCR through **v0.10.0** still runs the first Search **before** listen.
 
 ## How it works
 
-1. `cache.StartRefresher` starts a background fetch on process start, then every **15 minutes** (the ticker is created **after** that first fetch returns, so a slow Search delays the next tick, not listen). The HTTP server binds immediately (`/healthz` is `starting` until the first fetch finishes) so a slow or failing GitHub Search cannot delay listen or trip TCP liveness. Until that fetch lands, `GET /` looks like an empty catalog — **No matching issues**, no starting banner (amber is `degraded` only; red is first-fetch failure). Browsers never call GitHub.
+1. `cache.StartRefresher` starts a background fetch on process start, then every **15 minutes** (the ticker is created **after** that first fetch returns, so a slow Search delays the next tick, not listen). The HTTP server binds immediately (`/healthz` is `starting` until the first fetch finishes) so a slow or failing GitHub Search cannot delay listen or trip TCP liveness. Until that fetch lands, `GET /` looks like an empty catalog — **No matching issues**, no Last refresh, no starting banner (amber is `degraded` only; red is first-fetch failure). A successful empty Search looks the same except Last refresh is set. Browsers never call GitHub.
 2. Fixed Search query: `org:kubernetes-sigs is:issue is:open label:"good first issue" no:assignee`
 3. Pagination: 100 items/page, **max 10 pages** (~1000 results — GitHub Search cap). Stops early when a page is short or unique results reach GitHub's `total_count` (often fewer than 10 calls). Sorted `created` desc. HTTP client timeout 30s, `Accept: application/vnd.github+json`, `User-Agent: k8s-sigs-scout`. Duplicate `html_url` values are dropped, including across pages. A later-page HTTP error **or** HTTP 200 with `incomplete_results: true` (GitHub Search timeout — a partial page, often with a lowered `total_count`) returns **nil** so `cache.Set` keeps the last complete snapshot instead of silently shrinking the catalog. GHCR through **v0.10.0** still treats that 200 as success.
-4. A failed refresh keeps the last good snapshot (`degraded`). `Cache.Get` still returns that snapshot and a **nil** error; the failure string is on `HealthSnapshot().Error` (amber banner / `/healthz`). A first-fetch failure with an empty cache is `error`. `Get`/`Set` copy the issue slice — nested `Labels` / `LanguageHints` still alias the snapshot.
+4. A failed refresh keeps the last good snapshot (`degraded`). `Cache.Get` still returns that snapshot and a **nil** error; the failure string is on `HealthSnapshot().Error` (amber banner / `/healthz`). The next complete Search **replaces** that list (it can shrink or grow), clears `error` / the amber banner, advances `updated_at` / Last refresh, and returns `/healthz` to `ok`. There is no retry storm — recovery is the same 15-minute loop (`cache refreshed` in logs, not `cache refresh failed`). A first-fetch failure with an empty cache is `error`. `Get`/`Set` copy the issue slice — nested `Labels` / `LanguageHints` still alias the snapshot. GitHub error strings never include the token (status + optional `rate-limit-remaining` only).
 5. Filters and sort run in memory (`internal/filter`). `lang` matches stored `LanguageHints` only (normalized tokens, not `golang` / `documentation`). Repo dropdown options are the distinct, sorted repositories in the **full** cache, not the current filter. Equal sort keys break on `HTMLURL`.
 6. **New since last visit** compares each **visible card's** GitHub `created_at` (`data-created` UTC) to `localStorage` key `k8s-scout:lastVisit`. The header count is **the current page only**. An older issue that newly enters the catalog (just labeled, just unassigned) is **not** new. **Mark seen**, tab hide (`visibilitychange`), and page unload all write the timestamp. First visit shows `—`. HTMX `afterSwap` on `#results` re-runs the markers.
 
@@ -142,10 +150,10 @@ Kubernetes probes in `deploy/k8s/scout.yaml` are **TCP on 8080**, not this endpo
 
 | Symptom | Likely cause | What to do |
 |---------|--------------|------------|
-| `/healthz` `degraded` / amber banner | GitHub Search failed: 403 + `rate-limit-remaining=0`, a later-page error, or HTTP 200 + `incomplete_results` (`GitHub Search API returned incomplete results (page N)`) | Set `GITHUB_TOKEN`. Unauthenticated budget is ~60 req/h; a refresh can use up to 10 Search calls. That refresh's partial pages are discarded; the previous snapshot stays |
+| `/healthz` `degraded` / amber banner | GitHub Search failed: 403 + `rate-limit-remaining=0`, a later-page error, or HTTP 200 + `incomplete_results` (`GitHub Search API returned incomplete results (page N)`) | Set `GITHUB_TOKEN`. Unauthenticated budget is ~60 req/h; a refresh can use up to 10 Search calls. That refresh's partial pages are discarded; the previous snapshot stays. Banner and `error` clear on the next complete Search (`cache refreshed`); no restart required unless you just created the token |
 | Cached count dropped, `/healthz` still `ok` | Published GHCR / pin treats Search timeout (`incomplete_results`) as a full snapshot | Build from this tree. Current `main` fails that refresh (`degraded`) and keeps the last complete list |
 | `/healthz` 503 `error` | First refresh failed; RAM is empty | Same as the `degraded` row. UI shows a hard error, not stale data |
-| `/healthz` stays `starting` / UI shows 0 issues | First Search still running in the background; the dashboard has no loading banner | Wait for `cache refreshed` in logs, or set `GITHUB_TOKEN`. Reload `/` after `/healthz` is `ok` |
+| `/healthz` stays `starting` / UI shows 0 issues | First Search still running (no Last refresh) **or** a complete Search returned zero items (Last refresh set, `updated_at` present) | Wait for `cache refreshed` in logs, or set `GITHUB_TOKEN`. Reload `/` after `/healthz` is `ok`. A successful empty catalog is not a load failure — do not treat Last refresh + **No matching issues** as a hang |
 | Pod CrashLoop on **published** GHCR (`v0.10.0` / `:latest`) | Those tags still run the first Search **before** listen (up to 10 × 30s) | Build from this tree, or create `GITHUB_TOKEN` before start. Fixed on `main` |
 | Compose `PORT=3000` but the process still listens on 8080 | Compose maps host `PORT` → container `8080` | Open `http://localhost:3000`. To change the listen port, run the binary with `PORT=…` (not compose) |
 | `GITHUB_TOKEN` set but logs `github api auth enabled=false` | Value is whitespace-only after trim | Export a real PAT; empty / spaces disable auth |

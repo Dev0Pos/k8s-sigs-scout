@@ -59,7 +59,7 @@ kubectl -n k8s-scout rollout restart deploy/k8s-scout
 
 Scout liveness/readiness are **TCP on container port 8080** (readiness delay 2s / period 5s; liveness delay 10s / period 20s), not `GET /healthz`. After listen starts, the process stays Ready while GitHub is failing (`degraded` / `error`) or still empty (`starting` is HTTP 200). That is intentional: a Search outage must not restart the dashboard.
 
-On **current `main`**, `StartRefresher` does not block bind, so TCP probes pass while `/healthz` is `starting` and the UI shows **No matching issues** (no loading banner). The **pinned `v0.9.0`** image still runs the first Search before listen — a hung Search can CrashLoop (see Image pin).
+On **current `main`**, `StartRefresher` does not block bind, so TCP probes pass while `/healthz` is `starting` and the UI shows **No matching issues** (no loading banner). In-flight first fetch omits Last refresh; a successful empty Search still shows it. After `degraded`, the next complete Search replaces the stale catalog and clears the amber banner — no extra rollout unless you just created `k8s-scout-github`. The **pinned `v0.9.0`** image still runs the first Search before listen — a hung Search can CrashLoop (see Image pin).
 
 Requests/limits (from the manifests):
 
@@ -102,9 +102,9 @@ Useful app log lines (JSON `msg`): `listening`, `github api auth` (`enabled` boo
 
 | Symptom | Likely cause | What to do |
 |---------|--------------|------------|
-| Scout Ready but UI amber / `/healthz` `degraded` | GitHub Search 403 / rate limit, a later-page error, or HTTP 200 + `incomplete_results` (`incomplete results (page N)`) | Create `k8s-scout-github` (see above). That refresh's partial pages are discarded; the previous snapshot stays. TCP probes will still pass |
+| Scout Ready but UI amber / `/healthz` `degraded` | GitHub Search 403 / rate limit, a later-page error, or HTTP 200 + `incomplete_results` (`incomplete results (page N)`) | Create `k8s-scout-github` (see above) and `rollout restart` so the process rereads the token. That refresh's partial pages are discarded; the previous snapshot stays. TCP probes will still pass. After a complete Search (`cache refreshed`) the amber banner clears and Cached / Last refresh move to the new snapshot |
 | Cached count dropped, `/healthz` still `ok` | Pinned `v0.9.0` / published `v0.10.0` accept Search timeout pages as success | Expected on this pin. Bump to a tag that fails `incomplete_results`, or wait for a later 15m refresh to recover |
-| Scout Ready but UI empty / "No matching issues" | Current images bind before the first snapshot (`/healthz` `starting`) | Wait for log `cache refreshed`, then reload. Pinned `v0.9.0` should not show this — it only becomes Ready after the first fetch returns |
+| Scout Ready but UI empty / "No matching issues" | Current images bind before the first snapshot (`/healthz` `starting`, no Last refresh) **or** Search returned zero items (Last refresh set) | Wait for log `cache refreshed`, then reload. Last refresh + empty catalog is a successful empty Search, not a hang. Pinned `v0.9.0` should not show the in-flight empty state — it only becomes Ready after the first fetch returns |
 | Scout `/healthz` 503 | First refresh failed; empty cache | Same token fix. Check logs: `{namespace="k8s-scout", app="k8s-scout"} \|= "cache refresh failed"` |
 | Scout CrashLoop / `install.sh` rollout timeout | Pinned `v0.9.0` runs first Search **before** listen; unauthenticated Search can exceed liveness (~50s) | Create `k8s-scout-github` before apply, or bump the image to a tag with background first-refresh. `kubectl -n k8s-scout logs deploy/k8s-scout` |
 | Loki PVC Pending | No `local-path` StorageClass | Install a local-path provisioner or change `storageClassName` in `loki.yaml` |
