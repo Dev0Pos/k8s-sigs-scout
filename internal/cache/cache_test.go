@@ -451,6 +451,35 @@ func TestStartRefresherSuccessfulRefreshClearsDegraded(t *testing.T) {
 	}
 }
 
+func TestSetFailureAfterSuccessfulEmptyIsErrorNotDegraded(t *testing.T) {
+	// Degraded requires a non-empty snapshot. A later GitHub failure after a
+	// complete empty Search must stay error (503), keep the empty-success
+	// updated_at, and surface the error on Get.
+	c := &cache.Cache{}
+	c.Set(nil, nil)
+	_, successAt, err := c.Get()
+	if err != nil || successAt.IsZero() {
+		t.Fatalf("Get after empty success = %v %v", successAt, err)
+	}
+	before := c.HealthSnapshot()
+	if before.Status != "starting" || before.UpdatedAt == "" {
+		t.Fatalf("precondition: want starting with updated_at, got %+v", before)
+	}
+
+	c.Set(nil, errors.New("boom"))
+	got, failedAt, err := c.Get()
+	if err == nil || err.Error() != "boom" || len(got) != 0 {
+		t.Fatalf("Get after empty-then-fail = %v %v", got, err)
+	}
+	if !failedAt.Equal(successAt) {
+		t.Fatalf("failed refresh advanced updatedAt from %v to %v", successAt, failedAt)
+	}
+	h := c.HealthSnapshot()
+	if h.Status != "error" || h.Issues != 0 || h.Error != "boom" || h.UpdatedAt != before.UpdatedAt {
+		t.Fatalf("health after empty-then-fail = %+v, want error with same updated_at as %+v", h, before)
+	}
+}
+
 func TestHealthSuccessfulEmptyCatalogIsStartingNotError(t *testing.T) {
 	// A complete Search that finds nothing is still a successful snapshot:
 	// stamp updated_at, do not set Get error, and do not report probe status
@@ -470,6 +499,44 @@ func TestHealthSuccessfulEmptyCatalogIsStartingNotError(t *testing.T) {
 	}
 	if _, parseErr := time.Parse(time.RFC3339, h.UpdatedAt); parseErr != nil {
 		t.Fatalf("updated_at %q is not RFC3339: %v", h.UpdatedAt, parseErr)
+	}
+}
+
+func TestStartRefresherSuccessfulEmptyCatalog(t *testing.T) {
+	// A complete Search with zero items is still a successful refresh:
+	// stamp updated_at, keep Get's error nil, and stay starting (not error).
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"total_count": 0,
+			"items":       []any{},
+		})
+	}))
+	t.Cleanup(srv.Close)
+
+	prev := github.DefaultClient
+	github.DefaultClient = &github.Client{HTTP: srv.Client(), BaseURL: srv.URL, PerPage: 10}
+	t.Cleanup(func() { github.DefaultClient = prev })
+
+	c := &cache.Cache{}
+	cache.StartRefresher(c, time.Hour)
+
+	deadline := time.Now().Add(2 * time.Second)
+	var h cache.Health
+	for time.Now().Before(deadline) {
+		h = c.HealthSnapshot()
+		if h.UpdatedAt != "" {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if h.Status != "starting" || h.Issues != 0 || h.Error != "" || h.UpdatedAt == "" {
+		t.Fatalf("empty success health = %+v, want starting with updated_at", h)
+	}
+
+	got, updatedAt, err := c.Get()
+	if err != nil || len(got) != 0 || updatedAt.IsZero() {
+		t.Fatalf("empty success Get = %v %v %v", got, updatedAt, err)
 	}
 }
 

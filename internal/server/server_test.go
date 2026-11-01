@@ -1232,3 +1232,222 @@ func TestIndexSuccessfulEmptyCatalogNotLoadFailure(t *testing.T) {
 		t.Fatalf("empty-success healthz = %+v, want non-error snapshot with updated_at", probe)
 	}
 }
+
+func TestIndexFiltersCombineWithAND(t *testing.T) {
+	// q, lang, and repo are AND. An issue matching only two of the three
+	// must not appear — OR would leak helpers from other repos/languages.
+	store := fakeStore{issues: []issue.Issue{
+		{
+			Title:         "Add helper",
+			Repository:    "kubernetes-sigs/kind",
+			HTMLURL:       "https://example.com/match",
+			LanguageHints: []string{"go"},
+		},
+		{
+			Title:         "Add helper",
+			Repository:    "kubernetes-sigs/kubespray",
+			HTMLURL:       "https://example.com/lang-q",
+			LanguageHints: []string{"go"},
+		},
+		{
+			Title:         "Add helper",
+			Repository:    "kubernetes-sigs/kind",
+			HTMLURL:       "https://example.com/repo-q",
+			LanguageHints: []string{"python"},
+		},
+		{
+			Title:         "Unrelated",
+			Repository:    "kubernetes-sigs/kind",
+			HTMLURL:       "https://example.com/lang-repo",
+			LanguageHints: []string{"go"},
+		},
+	}}
+	srv, err := server.New(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/?q=helper&lang=go&repo=kubernetes-sigs/kind", nil)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d", rec.Code)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, `href="https://example.com/match"`) {
+		t.Fatalf("missing AND match: %s", body)
+	}
+	if strings.Contains(body, "example.com/lang-q") || strings.Contains(body, "example.com/repo-q") || strings.Contains(body, "example.com/lang-repo") {
+		t.Fatalf("AND leaked a two-of-three match: %s", body)
+	}
+	if strings.Contains(body, ">Unrelated<") {
+		t.Fatal("q miss still rendered")
+	}
+	if !strings.Contains(body, ">1–1<") || !strings.Contains(body, "(filtered from 4)") {
+		t.Fatalf("AND should leave one of four issues: %s", body)
+	}
+}
+
+func TestIndexQueryIgnoresHTMLURLCommentsAndHints(t *testing.T) {
+	store := fakeStore{issues: []issue.Issue{
+		{
+			Title:         "Alpha",
+			Repository:    "kubernetes-sigs/kind",
+			HTMLURL:       "https://github.com/kubernetes-sigs/kind/issues/secret-needle",
+			Labels:        []string{"good first issue"},
+			LanguageHints: []string{"docs"},
+		},
+		{
+			Title:         "Beta",
+			Repository:    "kubernetes-sigs/cluster-api",
+			HTMLURL:       "https://example.com/2",
+			Comments:      4242,
+			Labels:        []string{"good first issue"},
+		},
+		{
+			Title:         "Gamma",
+			Repository:    "kubernetes-sigs/cluster-api",
+			HTMLURL:       "https://example.com/3",
+			Labels:        []string{"good first issue"},
+			LanguageHints: []string{"helm"},
+		},
+		{
+			Title:      "Has secret-needle in title",
+			Repository: "kubernetes-sigs/kind",
+			HTMLURL:    "https://example.com/4",
+			Labels:     []string{"good first issue"},
+		},
+	}}
+	srv, err := server.New(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	urlOnly := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(urlOnly, httptest.NewRequest(http.MethodGet, "/?q=secret-needle", nil))
+	if !strings.Contains(urlOnly.Body.String(), ">Has secret-needle in title<") {
+		t.Fatalf("title match missing: %s", urlOnly.Body.String())
+	}
+	if strings.Contains(urlOnly.Body.String(), ">Alpha<") {
+		t.Fatal("q must not match HTMLURL")
+	}
+
+	comments := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(comments, httptest.NewRequest(http.MethodGet, "/?q=4242", nil))
+	if !strings.Contains(comments.Body.String(), "No matching issues.") || strings.Contains(comments.Body.String(), ">Beta<") {
+		t.Fatalf("q must not match comment count: %s", comments.Body.String())
+	}
+
+	hint := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(hint, httptest.NewRequest(http.MethodGet, "/?q=helm", nil))
+	if !strings.Contains(hint.Body.String(), "No matching issues.") || strings.Contains(hint.Body.String(), ">Gamma<") {
+		t.Fatalf("q must not match LanguageHints: %s", hint.Body.String())
+	}
+}
+
+func TestIndexFirstFetchErrorThenRecovery(t *testing.T) {
+	// Complementary to degraded→ok: a failed cold start (red banner, 503)
+	// must heal on the next complete Search — not keep error after issues land.
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"total_count": 1,
+			"items": []map[string]any{{
+				"title":          "Recovered",
+				"html_url":       "https://github.com/kubernetes-sigs/kind/issues/11",
+				"comments":       0,
+				"created_at":     time.Date(2025, 1, 2, 0, 0, 0, 0, time.UTC),
+				"labels":         []map[string]string{{"name": "good first issue"}},
+				"repository_url": "https://api.github.com/repos/kubernetes-sigs/kind",
+			}},
+		})
+	}))
+	t.Cleanup(upstream.Close)
+
+	prev := github.DefaultClient
+	github.DefaultClient = &github.Client{HTTP: upstream.Client(), BaseURL: upstream.URL, PerPage: 10}
+	t.Cleanup(func() { github.DefaultClient = prev })
+
+	c := &cache.Cache{}
+	c.Set(nil, errors.New("github 403"))
+	srv, err := server.New(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	failed := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(failed, httptest.NewRequest(http.MethodGet, "/", nil))
+	if !strings.Contains(failed.Body.String(), "Failed to load issues") {
+		t.Fatalf("precondition: want red load banner, got %s", failed.Body.String())
+	}
+	preHealth := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(preHealth, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+	if preHealth.Code != http.StatusServiceUnavailable {
+		t.Fatalf("precondition healthz = %d, want 503", preHealth.Code)
+	}
+
+	cache.StartRefresher(c, time.Hour)
+	deadline := time.Now().Add(2 * time.Second)
+	var h cache.Health
+	for time.Now().Before(deadline) {
+		h = c.HealthSnapshot()
+		if h.Status == "ok" {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if h.Status != "ok" || h.Issues != 1 || h.Error != "" {
+		t.Fatalf("cache never recovered from first-fetch error: %+v", h)
+	}
+
+	page := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(page, httptest.NewRequest(http.MethodGet, "/", nil))
+	body := page.Body.String()
+	if !strings.Contains(body, ">Recovered<") {
+		t.Fatalf("dashboard missing recovered issue: %s", body)
+	}
+	if strings.Contains(body, "Failed to load issues") {
+		t.Fatal("red banner must clear after first successful fetch")
+	}
+	if strings.Contains(body, "Showing cached data") {
+		t.Fatal("recovered cold start must not look degraded")
+	}
+
+	health := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(health, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+	if health.Code != http.StatusOK {
+		t.Fatalf("recovered healthz = %d, want 200", health.Code)
+	}
+	var probe cache.Health
+	if err := json.NewDecoder(health.Body).Decode(&probe); err != nil {
+		t.Fatal(err)
+	}
+	if probe.Status != "ok" || probe.Issues != 1 || probe.Error != "" {
+		t.Fatalf("healthz after error recovery = %+v", probe)
+	}
+}
+
+func TestIndexEscapesDegradedCacheError(t *testing.T) {
+	store := fakeStore{
+		issues: []issue.Issue{{Title: "Stale", Repository: "kubernetes-sigs/kind", HTMLURL: "https://example.com/1"}},
+		health: cache.Health{Status: "degraded", Issues: 1, Error: `<script>alert("xss")</script>`},
+	}
+	srv, err := server.New(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+	body := rec.Body.String()
+	if !strings.Contains(body, "Showing cached data") {
+		t.Fatal("missing degraded banner")
+	}
+	if strings.Contains(body, `<script>alert("xss")</script>`) {
+		t.Fatal("raw script in CacheError must not appear in HTML")
+	}
+	if !strings.Contains(body, "&lt;script&gt;") {
+		t.Fatalf("amber CacheError should be HTML-escaped: %s", body)
+	}
+	if !strings.Contains(body, ">Stale<") {
+		t.Fatalf("stale issue missing: %s", body)
+	}
+}
