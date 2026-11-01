@@ -158,6 +158,55 @@ func TestIssuesLangGoDoesNotMatchGoodFirstIssueLabel(t *testing.T) {
 	}
 }
 
+func TestIssuesQueryIgnoresHTMLURLCommentsAndHints(t *testing.T) {
+	// q is title + repository + labels only. Searching html_url, comment
+	// counts, or derived LanguageHints would match every card (github.com)
+	// or treat hint tokens as free text. Use helm — not go — because the
+	// "good first issue" label already contains the substring "go".
+	issues := []issue.Issue{
+		{
+			Title:         "Alpha",
+			Repository:    "kubernetes-sigs/kind",
+			HTMLURL:       "https://github.com/kubernetes-sigs/kind/issues/secret-needle",
+			Comments:      0,
+			Labels:        []string{"good first issue"},
+			LanguageHints: []string{"docs"},
+		},
+		{
+			Title:         "Beta",
+			Repository:    "kubernetes-sigs/cluster-api",
+			HTMLURL:       "https://example.com/2",
+			Comments:      4242,
+			Labels:        []string{"good first issue"},
+			LanguageHints: []string{"python"},
+		},
+		{
+			Title:         "Gamma",
+			Repository:    "kubernetes-sigs/cluster-api",
+			HTMLURL:       "https://example.com/3",
+			Comments:      0,
+			Labels:        []string{"good first issue"},
+			LanguageHints: []string{"helm"},
+		},
+		{
+			Title:      "Has secret-needle in title",
+			Repository: "kubernetes-sigs/kind",
+			HTMLURL:    "https://example.com/4",
+			Labels:     []string{"good first issue"},
+		},
+	}
+
+	if got := filter.Issues(issues, "secret-needle", "", ""); len(got) != 1 || got[0].Title != "Has secret-needle in title" {
+		t.Fatalf("q must not match HTMLURL: %+v", got)
+	}
+	if got := filter.Issues(issues, "4242", "", ""); len(got) != 0 {
+		t.Fatalf("q must not match comment count, got %+v", got)
+	}
+	if got := filter.Issues(issues, "helm", "", ""); len(got) != 0 {
+		t.Fatalf("q must not match LanguageHints, got %+v", got)
+	}
+}
+
 func TestIssuesLangAliasesDoNotMatchNormalizedHints(t *testing.T) {
 	// LanguageHints normalizes golang→go and documentation→docs at derivation.
 	// lang compares those stored hints exactly — typed aliases match nothing.
